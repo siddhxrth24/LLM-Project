@@ -1,0 +1,59 @@
+# SemesTrack
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Models (downloaded separately)
+models/*.bin
+models/*.safetensors
+models/*.gguf
+models/**/*.safetensors
+models/**/*.bin
+models/**/*.gguf
+models/**/*.model
+models/**/pytorch_model*
+models/**/model*
+
+# Data & uploads
+data/uploads/
+data/chroma/
+data/*.db
+data/*.sqlite
+
+# Training outputs
+training/output/
+training/checkpoints/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
