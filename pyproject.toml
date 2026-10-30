@@ -3,7 +3,7 @@ name = "semestrack"
 version = "0.1.0"
 description = "SemesTrack offline AI learning platform backend"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi[standard]>=0.115,<0.120",
     "uvicorn[standard]>=0.30",
@@ -36,8 +36,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["backend/app"]
 
-[tool.uv]
-find-links = ["https://download.pytorch.org/whl/cpu"]
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]

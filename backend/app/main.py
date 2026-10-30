@@ -18,8 +18,6 @@ from app.api import (
 from app.core.config import settings
 from app.core.database import init_db
 from app.core.logging_config import logger
-from app.services.embedding_service import get_embedding_service
-from app.services.llm_service import get_llm_service
 
 
 @asynccontextmanager
@@ -32,19 +30,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         init_db()
     except Exception as exc:
         logger.error(f"Database initialization error: {exc}")
-
-    # 2. Attempt lazy offline model loading (non-blocking if files absent)
-    try:
-        emb_svc = get_embedding_service()
-        emb_svc.load_model()
-    except Exception as exc:
-        logger.warning(f"Initial embedding load skipped: {exc}")
-
-    try:
-        llm_svc = get_llm_service()
-        llm_svc.load_model()
-    except Exception as exc:
-        logger.warning(f"Initial LLM load skipped: {exc}")
 
     logger.info("Application startup complete.")
     yield

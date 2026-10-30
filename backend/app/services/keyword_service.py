@@ -95,19 +95,19 @@ def delete_chunks(db: Session, document_id: int) -> None:
     """Remove all FTS5 index entries associated with a document ID."""
     try:
         # Look up chunk ids belonging to document
-        chunk_ids = (
-            db.query(Chunk.id).filter(Chunk.document_id == document_id).all()
-        )
-        if not chunk_ids:
-            return
-
-        id_strs = [str(r[0]) for r in chunk_ids]
-        # Delete matching rows from FTS5
-        in_clause = ", ".join(f"'{cid}'" for cid in id_strs)
-        query = text(f"DELETE FROM document_fts WHERE chunk_id IN ({in_clause})")
-        db.execute(query)
-        db.commit()
-        logger.info(f"Deleted FTS5 entries for document {document_id}")
+            db.execute(
+                text(
+                    """
+                    DELETE FROM document_fts
+                    WHERE chunk_id IN (
+                        SELECT CAST(id AS TEXT) FROM chunks WHERE document_id = :document_id
+                    )
+                    OR chunk_id NOT IN (SELECT CAST(id AS TEXT) FROM chunks)
+                    """
+                ),
+                {"document_id": document_id},
+            )
+            logger.info(f"Deleted FTS5 entries for document {document_id}")
     except Exception as exc:
         db.rollback()
         logger.error(f"Failed to delete FTS5 chunks for document {document_id}: {exc}")

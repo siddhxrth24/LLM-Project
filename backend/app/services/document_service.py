@@ -161,8 +161,12 @@ def process_document(document_id: int, db: Session) -> Document:
             source_filename=doc.original_filename,
         )
 
-        # 3. Save chunks in Database
-        # Clean any old chunks if re-processing
+        # 3. Clear old indexes before replacing the relational chunks.
+        fts_delete_chunks(db, doc.id)
+        embedding_svc = get_embedding_service()
+        if not embedding_svc.delete_chunks(doc.id):
+            raise RuntimeError("Could not remove existing vector entries before reprocessing.")
+
         db.query(Chunk).filter(Chunk.document_id == doc.id).delete()
 
         db_chunks: list[Chunk] = []
@@ -181,10 +185,7 @@ def process_document(document_id: int, db: Session) -> Document:
             db.add(chunk_record)
             db_chunks.append(chunk_record)
 
-        db.commit()
-
-        for c in db_chunks:
-            db.refresh(c)
+        db.flush()
 
         # 4. FTS5 full-text indexing
         chunks_payload: list[dict[str, Any]] = [
@@ -199,11 +200,13 @@ def process_document(document_id: int, db: Session) -> Document:
             }
             for c in db_chunks
         ]
-        index_chunks_batch(db, chunks_payload)
+        if chunks_payload:
+            index_chunks_batch(db, chunks_payload)
+        else:
+            db.commit()
 
         # 5. Chroma vector embeddings
         try:
-            embedding_svc = get_embedding_service()
             chroma_ids = embedding_svc.store_chunks(
                 chunks=[{"content": c.content, "chunk_index": c.chunk_index, "id": c.id, "source_filename": c.source_filename, "page_number": c.page_number, "slide_number": c.slide_number} for c in db_chunks],
                 course_id=doc.course_id,
@@ -248,27 +251,54 @@ def delete_document(document_id: int, db: Session) -> bool:
     if not doc:
         return False
 
-    # 1. Delete from FTS5
-    fts_delete_chunks(db, document_id)
-
-    # 2. Delete from ChromaDB
+    # Vector storage is independent of the SQL transaction; abort if cleanup fails.
     try:
-        embedding_svc = get_embedding_service()
-        embedding_svc.delete_chunks(document_id)
+        vectors_deleted = get_embedding_service().delete_chunks(document_id)
     except Exception as exc:
-        logger.warning(f"Failed deleting Chroma vectors for document {document_id}: {exc}")
+        logger.error(f"Failed deleting Chroma vectors for document {document_id}: {exc}")
+        vectors_deleted = False
+    if not vectors_deleted:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vector cleanup failed; the document was not deleted.",
+        )
 
-    # 3. Delete physical file
+    file_path = Path(doc.file_path)
+    quarantined_path: Path | None = None
     try:
-        file_path = Path(doc.file_path)
         if file_path.exists():
-            file_path.unlink()
-    except Exception as exc:
-        logger.warning(f"Could not delete physical file {doc.file_path}: {exc}")
+            quarantined_path = file_path.with_name(
+                f".{file_path.name}.{uuid.uuid4().hex}.deleting"
+            )
+            file_path.replace(quarantined_path)
 
-    # 4. Delete document record (cascade deletes chunks in SQLite)
-    db.delete(doc)
-    db.commit()
+        fts_delete_chunks(db, document_id)
+        db.delete(doc)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        if quarantined_path and quarantined_path.exists():
+            try:
+                quarantined_path.replace(file_path)
+            except OSError as restore_exc:
+                logger.error(
+                    f"Failed to restore document file {file_path} after cleanup error: "
+                    f"{restore_exc}"
+                )
+        if isinstance(exc, HTTPException):
+            raise
+        logger.error(f"Failed to delete document {document_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Document cleanup failed; the database record was retained.",
+        ) from exc
+
+    if quarantined_path:
+        try:
+            quarantined_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"Could not remove quarantined file {quarantined_path}: {exc}")
+
     logger.info(f"Deleted document {document_id}")
     return True
 

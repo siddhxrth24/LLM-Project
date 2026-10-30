@@ -44,25 +44,36 @@ class EmbeddingService:
     def is_loaded(self) -> bool:
         return self.model is not None
 
+    def is_vector_store_ready(self) -> bool:
+        return self._collection is not None
+
     def load_model(self) -> bool:
         """Load sentence-transformers model from local disk path or model ID."""
         if self.model is not None:
             return True
 
         local_path = settings.resolved_embedding_model_path
-        target = str(local_path) if local_path.exists() and any(local_path.iterdir()) else settings.EMBEDDING_MODEL_ID
+        try:
+            has_local_model = local_path.is_dir() and any(local_path.iterdir())
+        except OSError:
+            has_local_model = False
+        if not has_local_model:
+            logger.warning(f"Embedding model files are unavailable locally at {local_path}.")
+            return False
 
-        logger.info(f"Attempting to load embedding model from '{target}' (CPU-only)...")
+        logger.info(f"Attempting to load embedding model from '{local_path}' (CPU-only)...")
         try:
             from sentence_transformers import SentenceTransformer
 
             # Offline CPU loading
-            self.model = SentenceTransformer(target, device="cpu")
+            self.model = SentenceTransformer(
+                str(local_path), device="cpu", local_files_only=True
+            )
             logger.info("SentenceTransformer embedding model successfully loaded.")
             return True
         except Exception as exc:
             logger.warning(
-                f"Embedding model could not be loaded from '{target}': {exc}. "
+                f"Embedding model could not be loaded from '{local_path}': {exc}. "
                 f"For offline use, please download the model to {local_path}."
             )
             self.model = None
@@ -152,15 +163,17 @@ class EmbeddingService:
         logger.info(f"Stored {len(ids)} chunks in ChromaDB for document {document_id}")
         return ids
 
-    def delete_chunks(self, document_id: int) -> None:
-        """Remove all chunks associated with a document ID from ChromaDB."""
+    def delete_chunks(self, document_id: int) -> bool:
+        """Remove all vectors associated with a document ID from ChromaDB."""
         if self._collection is None:
-            return
+            return True
         try:
             self._collection.delete(where={"document_id": int(document_id)})
             logger.info(f"Deleted ChromaDB vectors for document {document_id}")
+            return True
         except Exception as exc:
             logger.error(f"Error deleting Chroma chunks for document {document_id}: {exc}")
+            return False
 
     def search_dense(
         self,

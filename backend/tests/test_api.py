@@ -1,7 +1,12 @@
 import io
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from app.models.models import Course, SyllabusTopic
+from app.main import app
+from app.services.embedding_service import EmbeddingService
+from app.services.llm_service import LLMService
 
 
 def test_course_crud(client: TestClient) -> None:
@@ -114,3 +119,67 @@ def test_system_settings_and_missing_model_handling(client: TestClient, test_cou
     if gen_resp.status_code != 200:
         assert gen_resp.status_code == 503
         assert "LLM model is not loaded" in gen_resp.json()["detail"]
+
+
+def test_preflight_reports_readiness_without_loading_models(
+    client: TestClient, monkeypatch
+) -> None:
+    """Preflight checks local capabilities without loading or downloading models."""
+    def fail_if_loaded(self) -> bool:
+        raise AssertionError("Preflight must not load models")
+
+    monkeypatch.setattr(LLMService, "load_model", fail_if_loaded)
+    monkeypatch.setattr(EmbeddingService, "load_model", fail_if_loaded)
+
+    response = client.get("/api/settings/preflight")
+
+    assert response.status_code == 200
+    result = response.json()
+    checks = {check["name"]: check for check in result["checks"]}
+    assert result["status"] in {"ready", "degraded", "blocked"}
+    assert checks["database"]["status"] == "ready"
+    assert checks["fts5"]["status"] == "ready"
+    assert "upload_storage" in checks
+    assert "chroma_package" in checks
+    assert "vector_store" in checks
+    assert "embedding_model" in checks
+    assert "llm_model" in checks
+
+
+def test_model_loaders_do_not_fall_back_to_remote_ids(monkeypatch, tmp_path) -> None:
+    """Missing local model files must fail without attempting remote resolution."""
+    import app.services.embedding_service as embedding_module
+    import app.services.llm_service as llm_module
+
+    monkeypatch.setattr(
+        llm_module,
+        "settings",
+        SimpleNamespace(resolved_llm_model_path=tmp_path),
+    )
+    monkeypatch.setattr(
+        embedding_module,
+        "settings",
+        SimpleNamespace(resolved_embedding_model_path=tmp_path),
+    )
+
+    llm_service = LLMService()
+    embedding_service = EmbeddingService.__new__(EmbeddingService)
+    embedding_service.model = None
+
+    assert llm_service.load_model() is False
+    assert embedding_service.load_model() is False
+
+
+def test_application_startup_does_not_load_models(monkeypatch) -> None:
+    """Starting the API must not load or download model weights."""
+    def fail_if_loaded(self) -> bool:
+        raise AssertionError("Application startup must not load models")
+
+    monkeypatch.setattr(LLMService, "load_model", fail_if_loaded)
+    monkeypatch.setattr(EmbeddingService, "load_model", fail_if_loaded)
+
+    with TestClient(app) as startup_client:
+        response = startup_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "healthy"}

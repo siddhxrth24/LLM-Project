@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -41,6 +41,17 @@ class SystemStatusResponse(BaseModel):
     models: ModelStatusResponse
     storage: StorageStatus
     environment: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreflightCheck(BaseModel):
+    name: str
+    status: Literal["ready", "degraded", "blocked"]
+    detail: str
+
+
+class PreflightResponse(BaseModel):
+    status: Literal["ready", "degraded", "blocked"]
+    checks: list[PreflightCheck]
 
 
 class ModelLoadRequest(BaseModel):

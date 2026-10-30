@@ -35,7 +35,7 @@
 
 ### M2: Database & Core API
 - [ ] SQLAlchemy models: Course, Unit, Document, Chunk, Topic, StudySession
-- [ ] Database initialization / migration
+- [x] Database initialization / migration
 - [ ] CRUD API endpoints for courses, units, documents
 - [ ] Pydantic schemas for all entities
 

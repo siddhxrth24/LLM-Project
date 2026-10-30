@@ -242,6 +242,17 @@ export interface SystemStatus {
   environment: Record<string, unknown>;
 }
 
+export interface PreflightCheck {
+  name: string;
+  status: 'ready' | 'degraded' | 'blocked';
+  detail: string;
+}
+
+export interface PreflightStatus {
+  status: 'ready' | 'degraded' | 'blocked';
+  checks: PreflightCheck[];
+}
+
 export interface ModelLoadInput {
   load_llm?: boolean;
   load_embedding?: boolean;
@@ -554,6 +565,16 @@ export function useSystemStatus() {
   });
 }
 
+export function usePreflightStatus() {
+  return useQuery<PreflightStatus>({
+    queryKey: ['settings', 'preflight'],
+    queryFn: async () => {
+      const response = await api.get('/settings/preflight');
+      return response.data;
+    },
+  });
+}
+
 export function useModelStatus() {
   return useQuery<ModelStatus>({
     queryKey: ['settings', 'models'],
@@ -574,6 +595,7 @@ export function useLoadModels() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings', 'models'] });
       queryClient.invalidateQueries({ queryKey: ['settings', 'status'] });
+      queryClient.invalidateQueries({ queryKey: ['settings', 'preflight'] });
     },
   });
 }

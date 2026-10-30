@@ -2,7 +2,8 @@ from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import settings
@@ -34,6 +35,116 @@ SessionLocal = sessionmaker(
     expire_on_commit=False,
 )
 
+SCHEMA_VERSION = 1
+FTS_TABLE_SQL = """
+    CREATE VIRTUAL TABLE document_fts USING fts5(
+        chunk_id UNINDEXED,
+        course_id UNINDEXED,
+        unit_id UNINDEXED,
+        source_filename UNINDEXED,
+        page_number UNINDEXED,
+        content,
+        tokenize='porter unicode61'
+    )
+"""
+
+
+def _validate_existing_columns(connection: Connection, existing_tables: set[str]) -> None:
+    inspector = inspect(connection)
+    incompatible: list[str] = []
+
+    for table_name in existing_tables & set(Base.metadata.tables):
+        actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        expected_columns = {column.name for column in Base.metadata.tables[table_name].columns}
+        missing_columns = expected_columns - actual_columns
+        if missing_columns:
+            incompatible.append(
+                f"{table_name} is missing columns: {', '.join(sorted(missing_columns))}"
+            )
+
+    if incompatible:
+        details = "; ".join(incompatible)
+        raise RuntimeError(
+            "The existing database schema is incompatible with this version. "
+            f"No migration was applied. {details}"
+        )
+
+
+def _validate_model_schema(connection: Connection) -> None:
+    inspector = inspect(connection)
+    existing_tables = set(inspector.get_table_names())
+    missing_tables = set(Base.metadata.tables) - existing_tables
+    if missing_tables:
+        raise RuntimeError(
+            "Database migration did not create required tables: "
+            + ", ".join(sorted(missing_tables))
+        )
+    _validate_existing_columns(connection, existing_tables)
+
+
+def _ensure_fts_table(connection: Connection) -> None:
+    table = connection.execute(
+        text("SELECT type, sql FROM sqlite_master WHERE name = 'document_fts'")
+    ).one_or_none()
+    if table is None:
+        connection.exec_driver_sql(FTS_TABLE_SQL)
+        connection.execute(
+            text(
+                """
+                INSERT INTO document_fts (
+                    chunk_id, course_id, unit_id, source_filename, page_number, content
+                )
+                SELECT CAST(id AS TEXT), CAST(course_id AS TEXT), CAST(unit_id AS TEXT),
+                       source_filename, CAST(COALESCE(page_number, slide_number, 0) AS TEXT),
+                       content
+                FROM chunks
+                """
+            )
+        )
+        return
+
+    expected_columns = {
+        "chunk_id", "course_id", "unit_id", "source_filename", "page_number", "content"
+    }
+    actual_columns = {
+        column[1] for column in connection.exec_driver_sql("PRAGMA table_info(document_fts)")
+    }
+    if (
+        table[0] != "table"
+        or "USING FTS5" not in (table[1] or "").upper()
+        or not expected_columns.issubset(actual_columns)
+    ):
+        raise RuntimeError("The existing document_fts index has an incompatible schema.")
+
+
+def migrate_schema(target_engine: Engine) -> None:
+    """Apply the versioned SQLite schema baseline without replacing user data."""
+    if target_engine.dialect.name != "sqlite":
+        raise RuntimeError("Schema migrations currently support SQLite only.")
+
+    # Import models so Base.metadata includes every application table.
+    import app.models.models  # noqa: F401
+
+    with target_engine.begin() as connection:
+        current_version = int(connection.exec_driver_sql("PRAGMA user_version").scalar_one())
+        if current_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Database schema version {current_version} is newer than supported "
+                f"version {SCHEMA_VERSION}."
+            )
+
+        existing_tables = set(inspect(connection).get_table_names())
+        if current_version == 0:
+            # Validate existing application tables before any additive changes.
+            _validate_existing_columns(connection, existing_tables)
+            Base.metadata.create_all(bind=connection)
+            _validate_model_schema(connection)
+            _ensure_fts_table(connection)
+            connection.exec_driver_sql(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        else:
+            _validate_model_schema(connection)
+            _ensure_fts_table(connection)
+
 
 def get_db() -> Generator[Session, None, None]:
     """FastAPI dependency yielding a SQLAlchemy session."""
@@ -57,32 +168,5 @@ def init_db() -> None:
     settings.resolved_upload_dir.mkdir(parents=True, exist_ok=True)
     settings.resolved_chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    # Import models here so metadata knows about them
-    import app.models.models  # noqa: F401
-
-    # Create standard tables
-    Base.metadata.create_all(bind=engine)
-    logger.info("Standard tables created successfully.")
-
-    # Create FTS5 virtual table for keyword search
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
-                        chunk_id UNINDEXED,
-                        course_id UNINDEXED,
-                        unit_id UNINDEXED,
-                        source_filename UNINDEXED,
-                        page_number UNINDEXED,
-                        content,
-                        tokenize='porter unicode61'
-                    );
-                    """
-                )
-            )
-            logger.info("FTS5 document_fts table verified/created.")
-    except Exception as exc:
-        logger.error(f"Failed to create FTS5 virtual table: {exc}")
-        raise
+    migrate_schema(engine)
+    logger.info(f"Database schema is at version {SCHEMA_VERSION}.")

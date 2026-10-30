@@ -1,5 +1,8 @@
 from collections.abc import Generator
 from datetime import date
+import os
+from pathlib import Path
+import tempfile
 from typing import Any
 
 import pytest
@@ -7,6 +10,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
+
+# Keep app lifespan initialization and upload tests away from the developer's data directory.
+_TEST_RUNTIME = tempfile.TemporaryDirectory(prefix="semestrack-tests-")
+_TEST_RUNTIME_DIR = Path(_TEST_RUNTIME.name)
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ["UPLOAD_DIR"] = str(_TEST_RUNTIME_DIR / "uploads")
+os.environ["CHROMA_DIR"] = str(_TEST_RUNTIME_DIR / "chroma")
 
 from app.core.database import Base, get_db
 from app.main import app

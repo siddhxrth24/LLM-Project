@@ -1,3 +1,6 @@
+import importlib.util
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, status
@@ -10,6 +13,8 @@ from app.models.models import Chunk, Course, Document
 from app.schemas.settings import (
     ModelLoadRequest,
     ModelStatusResponse,
+    PreflightCheck,
+    PreflightResponse,
     StorageStatus,
     SystemStatusResponse,
 )
@@ -17,6 +22,30 @@ from app.services.embedding_service import get_embedding_service
 from app.services.llm_service import get_llm_service
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _directory_has_files(path: Path) -> bool:
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
+
+
+def _directory_is_writable(path: Path) -> bool:
+    try:
+        if not path.is_dir():
+            return False
+        with tempfile.NamedTemporaryFile(dir=path, prefix=".semestrack-check-"):
+            return True
+    except OSError:
+        return False
 
 
 def _get_models_status() -> ModelStatusResponse:
@@ -38,6 +67,121 @@ def _get_models_status() -> ModelStatusResponse:
         embedding_loaded=emb_info["embedding_loaded"],
         embedding_device=emb_info["embedding_device"],
     )
+
+
+@router.get("/preflight", response_model=PreflightResponse)
+async def get_preflight(db: Session = Depends(get_db)) -> PreflightResponse:
+    """Check local setup readiness without loading or downloading models."""
+    database_ready = False
+    fts_ready = False
+    try:
+        db.execute(text("SELECT 1"))
+        database_ready = True
+        db.execute(text("SELECT COUNT(*) FROM document_fts")).scalar_one()
+        fts_ready = True
+    except Exception:
+        db.rollback()
+
+    upload_writable = _directory_is_writable(settings.resolved_upload_dir)
+    vector_storage_writable = _directory_is_writable(settings.resolved_chroma_dir)
+    chroma_available = _module_available("chromadb")
+    embedding_runtime_available = all(
+        _module_available(name) for name in ("torch", "sentence_transformers")
+    )
+    llm_runtime_available = all(
+        _module_available(name) for name in ("torch", "transformers")
+    )
+    embedding_files_available = _directory_has_files(settings.resolved_embedding_model_path)
+    llm_files_available = _directory_has_files(settings.resolved_llm_model_path)
+    vector_store_ready = False
+    if chroma_available and vector_storage_writable:
+        try:
+            vector_store_ready = get_embedding_service().is_vector_store_ready()
+        except Exception:
+            vector_store_ready = False
+
+    checks = [
+        PreflightCheck(
+            name="database",
+            status="ready" if database_ready else "blocked",
+            detail="Database connection is available."
+            if database_ready
+            else "Database is unavailable; check the configured database path and permissions.",
+        ),
+        PreflightCheck(
+            name="fts5",
+            status="ready" if fts_ready else "blocked",
+            detail="SQLite FTS5 index is available."
+            if fts_ready
+            else "SQLite FTS5 index is unavailable; initialize or repair the database.",
+        ),
+        PreflightCheck(
+            name="upload_storage",
+            status="ready" if upload_writable else "blocked",
+            detail="Upload storage is writable."
+            if upload_writable
+            else "Upload storage is missing or not writable.",
+        ),
+        PreflightCheck(
+            name="chroma_package",
+            status="ready" if chroma_available else "degraded",
+            detail="ChromaDB is installed."
+            if chroma_available
+            else "ChromaDB is unavailable; semantic retrieval will be disabled.",
+        ),
+        PreflightCheck(
+            name="vector_storage",
+            status="ready" if vector_storage_writable else "degraded",
+            detail="Vector storage is writable."
+            if vector_storage_writable
+            else "Vector storage is missing or not writable.",
+        ),
+        PreflightCheck(
+            name="vector_store",
+            status="ready" if vector_store_ready else "degraded",
+            detail="Chroma vector collection is available."
+            if vector_store_ready
+            else "Chroma vector collection is unavailable; semantic retrieval will be disabled.",
+        ),
+        PreflightCheck(
+            name="embedding_runtime",
+            status="ready" if embedding_runtime_available else "degraded",
+            detail="Embedding dependencies are installed."
+            if embedding_runtime_available
+            else "Install torch and sentence-transformers to enable embeddings.",
+        ),
+        PreflightCheck(
+            name="embedding_model",
+            status="ready" if embedding_files_available else "degraded",
+            detail="Embedding model files are available locally."
+            if embedding_files_available
+            else "Embedding model files are missing; download them before offline use.",
+        ),
+        PreflightCheck(
+            name="llm_runtime",
+            status="ready" if llm_runtime_available else "degraded",
+            detail="LLM dependencies are installed."
+            if llm_runtime_available
+            else "Install torch and transformers to enable local lesson generation.",
+        ),
+        PreflightCheck(
+            name="llm_model",
+            status="ready" if llm_files_available else "degraded",
+            detail="LLM model files are available locally."
+            if llm_files_available
+            else "LLM model files are missing; download them before offline use.",
+        ),
+    ]
+
+    core_ready = database_ready and fts_ready and upload_writable
+    status_value = (
+        "blocked"
+        if not core_ready
+        else "ready"
+        if all(check.status == "ready" for check in checks)
+        else "degraded"
+    )
+    return PreflightResponse(status=status_value, checks=checks)
 
 
 @router.get("/status", response_model=SystemStatusResponse)

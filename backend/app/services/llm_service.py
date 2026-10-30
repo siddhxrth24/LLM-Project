@@ -39,27 +39,33 @@ class LLMService:
             return True
 
         local_path = settings.resolved_llm_model_path
-        target = str(local_path) if local_path.exists() and any(local_path.iterdir()) else settings.LLM_MODEL_ID
+        try:
+            has_local_model = local_path.is_dir() and any(local_path.iterdir())
+        except OSError:
+            has_local_model = False
+        if not has_local_model:
+            logger.warning(f"LLM model files are unavailable locally at {local_path}.")
+            return False
 
-        logger.info(f"Loading LLM model from '{target}' (CPU inference)...")
+        logger.info(f"Loading LLM model from '{local_path}' (CPU inference)...")
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             self.tokenizer = AutoTokenizer.from_pretrained(
-                target,
+                str(local_path),
                 trust_remote_code=True,
-                local_files_only=local_path.exists(),
+                local_files_only=True,
             )
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
             self.model = AutoModelForCausalLM.from_pretrained(
-                target,
+                str(local_path),
                 torch_dtype=torch.float32,
                 device_map="cpu",
                 trust_remote_code=True,
-                local_files_only=local_path.exists(),
+                local_files_only=True,
             )
             self.model.eval()
 
@@ -71,7 +77,7 @@ class LLMService:
             return True
         except Exception as exc:
             logger.warning(
-                f"LLM model could not be loaded from '{target}': {exc}. "
+                f"LLM model could not be loaded from '{local_path}': {exc}. "
                 f"To run AI generation offline, download the model files to {local_path}."
             )
             self.model = None

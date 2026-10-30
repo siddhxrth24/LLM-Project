@@ -20,6 +20,7 @@ import {
 
 import {
   useSystemStatus,
+  usePreflightStatus,
   useModelStatus,
   useLoadModels,
   SystemStatus,
@@ -49,6 +50,12 @@ export default function Settings() {
     refetch: refetchModels,
   } = useModelStatus();
 
+  const {
+    data: preflight,
+    isLoading: isLoadingPreflight,
+    refetch: refetchPreflight,
+  } = usePreflightStatus();
+
   const loadModelsMutation = useLoadModels();
 
   // Fine-tuning command copy state
@@ -69,13 +76,13 @@ export default function Settings() {
         load_embedding: true,
         load_lora: false,
       });
-      await Promise.all([refetchSystem(), refetchModels()]);
+      await Promise.all([refetchSystem(), refetchModels(), refetchPreflight()]);
     } catch {
       // Handled by react query
     }
   };
 
-  if (isLoadingSystem || isLoadingModels) {
+  if (isLoadingSystem || isLoadingModels || isLoadingPreflight) {
     return <LoadingSpinner text="Reading offline system & model status..." fullHeight />;
   }
 
@@ -111,6 +118,7 @@ export default function Settings() {
             onClick={() => {
               refetchSystem();
               refetchModels();
+              refetchPreflight();
             }}
             className="text-xs gap-1.5 bg-white shadow-xs"
           >
@@ -130,14 +138,14 @@ export default function Settings() {
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-bold text-emerald-950">
-                  Air-Gapped Offline Protection Active
+                  Offline-First Runtime
                 </h2>
                 <Badge variant="outline" className="text-[10px] bg-emerald-100 text-emerald-800 border-emerald-300">
                   100% Private
                 </Badge>
               </div>
               <p className="text-xs text-emerald-800/90 mt-0.5">
-                SemesTrack is operating without sending any notes, syllabus documents, or chat logs to external cloud APIs. All models run in-process on CPU/GPU.
+                Model loading is explicit and limited to local files. Preflight checks show which local features are ready without downloading or loading models.
               </p>
             </div>
           </div>
@@ -148,6 +156,66 @@ export default function Settings() {
           </div>
         </div>
       </div>
+
+      <section className="space-y-3" aria-labelledby="preflight-heading">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 id="preflight-heading" className="text-base font-bold text-gray-900">
+              Local Setup Readiness
+            </h2>
+            <p className="text-xs text-gray-500">
+              Checks storage, indexing, installed runtimes, and local model files without loading them.
+            </p>
+          </div>
+          <Badge
+            variant="outline"
+            className={
+              preflight?.status === 'ready'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                : preflight?.status === 'blocked'
+                ? 'border-red-200 bg-red-50 text-red-800'
+                : 'border-amber-200 bg-amber-50 text-amber-800'
+            }
+          >
+            {preflight?.status || 'Unavailable'}
+          </Badge>
+        </div>
+        {preflight ? (
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {preflight.checks.map((check) => {
+              const isReady = check.status === 'ready';
+              const isBlocked = check.status === 'blocked';
+              const CheckIcon = isReady ? CheckCircle2 : isBlocked ? XCircle : AlertTriangle;
+              const stateClass = isReady
+                ? 'text-emerald-700'
+                : isBlocked
+                ? 'text-red-700'
+                : 'text-amber-700';
+
+              return (
+                <div
+                  key={check.name}
+                  className="flex min-w-0 items-start gap-2.5 border-b border-gray-200 py-3"
+                >
+                  <CheckIcon className={`mt-0.5 h-4 w-4 shrink-0 ${stateClass}`} />
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold capitalize text-gray-900">
+                      {check.name.replace(/_/g, ' ')}
+                    </p>
+                    <p className="mt-0.5 text-xs leading-relaxed text-gray-600">
+                      {check.detail}
+                    </p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-600">
+            Preflight data is unavailable. Refresh diagnostics after confirming the backend is running.
+          </p>
+        )}
+      </section>
 
       {/* 1. Model Status Section */}
       <div className="space-y-4">
