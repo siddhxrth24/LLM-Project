@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { format, differenceInCalendarDays, isValid, parseISO } from 'date-fns';
 
-import { useCourses, Course } from '@/lib/queries';
+import { useCourses, useCourseCoverageSummaries, Course } from '@/lib/queries';
 import { PageHeader } from '@/components/shared/PageHeader';
 import { EmptyState } from '@/components/shared/EmptyState';
 import { ErrorDisplay } from '@/components/shared/ErrorDisplay';
@@ -39,25 +39,24 @@ export default function Dashboard() {
     return [];
   }, [data]);
 
+  const coverageQueries = useCourseCoverageSummaries(courses.map((course) => course.id));
+
   // Derived stats
   const totalCourses = courses.length;
   const totalDocuments = courses.reduce((sum, c) => sum + (c.document_count || 0), 0);
   const totalTopics = courses.reduce((sum, c) => sum + (c.topic_count || 0), 0);
 
-  // Approximate overall coverage rate from topic counts & docs
+  // Only include courses with analyzed syllabus topics in the aggregate.
   const averageCoverage = React.useMemo(() => {
-    if (totalCourses === 0) return 0;
-    // Calculate based on courses having documents/topics
-    let totalScore = 0;
-    courses.forEach((c) => {
-      if (c.topic_count > 0 && c.document_count > 0) {
-        totalScore += Math.min(100, Math.round((c.document_count / Math.max(1, c.unit_count || 5)) * 100));
-      } else if (c.document_count > 0) {
-        totalScore += 25;
-      }
-    });
-    return Math.round(totalScore / totalCourses);
-  }, [courses, totalCourses]);
+    const analyzedPercentages = coverageQueries.flatMap((query) =>
+      query.data && query.data.total_topics > 0 ? [query.data.coverage_percentage] : []
+    );
+    if (analyzedPercentages.length === 0) return null;
+    return Math.round(
+      analyzedPercentages.reduce((total, percentage) => total + percentage, 0) /
+        analyzedPercentages.length
+    );
+  }, [coverageQueries]);
 
   const formatExamDate = (dateString?: string | null) => {
     if (!dateString) return null;
@@ -233,10 +232,15 @@ export default function Dashboard() {
               <p className="text-xs font-medium uppercase tracking-wider text-gray-500">
                 Material Coverage
               </p>
-              <p className="text-2xl font-bold text-gray-900">{averageCoverage}%</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {averageCoverage === null ? '—' : `${averageCoverage}%`}
+              </p>
               <div className="w-24 mt-1.5">
-                <Progress value={averageCoverage} className="h-1.5" />
+                <Progress value={averageCoverage ?? 0} className="h-1.5" />
               </div>
+              {averageCoverage === null && (
+                <p className="text-xs text-gray-500">Run coverage analysis to calculate</p>
+              )}
             </div>
             <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
               <Calendar className="h-6 w-6" />
@@ -276,11 +280,12 @@ export default function Dashboard() {
           />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {courses.map((course) => {
+            {courses.map((course, courseIndex) => {
               const examInfo = formatExamDate(course.exam_date);
-              const coverageEstimate = course.topic_count > 0
-                ? Math.min(100, Math.round(((course.document_count || 1) / Math.max(1, course.unit_count || 5)) * 100))
-                : 0;
+              const coverageSummary = coverageQueries[courseIndex]?.data;
+              const coveragePercentage = coverageSummary?.total_topics
+                ? Math.round(coverageSummary.coverage_percentage)
+                : null;
 
               return (
                 <Card
@@ -340,10 +345,12 @@ export default function Dashboard() {
                     {/* Progress details */}
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="text-gray-500 font-medium">Estimated Coverage</span>
-                        <span className="font-semibold text-gray-900">{coverageEstimate}%</span>
+                        <span className="text-gray-500 font-medium">Analyzed Coverage</span>
+                        <span className="font-semibold text-gray-900">
+                          {coveragePercentage === null ? 'Not analyzed' : `${coveragePercentage}%`}
+                        </span>
                       </div>
-                      <Progress value={coverageEstimate} className="h-2" />
+                      <Progress value={coveragePercentage ?? 0} className="h-2" />
                     </div>
 
                     {/* Quick counts */}

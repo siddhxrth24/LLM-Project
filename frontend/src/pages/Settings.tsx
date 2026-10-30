@@ -54,7 +54,7 @@ export default function Settings() {
   // Fine-tuning command copy state
   const [copied, setCopied] = React.useState(false);
 
-  const finetuneCommand = 'python -m app.services.finetune --data ./data/train.jsonl --epochs 2 --output ./models/lora_adapter';
+  const finetuneCommand = 'python scripts/finetune_lora.py --dataset ./training/data/train.jsonl --epochs 2 --output-dir ./training/output --offline';
 
   const handleCopyCommand = () => {
     navigator.clipboard.writeText(finetuneCommand);

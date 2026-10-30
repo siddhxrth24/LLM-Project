@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import api from './api';
 
 // ============================================================================
@@ -445,6 +445,18 @@ export function useCoverageData(courseId: number | string | undefined) {
       return response.data;
     },
     enabled: Boolean(courseId),
+  });
+}
+
+export function useCourseCoverageSummaries(courseIds: Array<number | string>) {
+  return useQueries({
+    queries: courseIds.map((courseId) => ({
+      queryKey: ['syllabus', 'coverage', courseId],
+      queryFn: async () => {
+        const response = await api.get(`/syllabus/coverage/${courseId}`);
+        return response.data as CoverageData;
+      },
+    })),
   });
 }
 
