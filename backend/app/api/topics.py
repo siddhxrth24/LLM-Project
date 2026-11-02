@@ -1,6 +1,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -51,7 +52,12 @@ async def generate_lesson(
         )
 
     regenerate = payload.regenerate if payload else False
-    record = svc_generate_content(topic_id=topic_id, db=db, regenerate=regenerate)
+    record = await run_in_threadpool(
+        svc_generate_content,
+        topic_id=topic_id,
+        db=db,
+        regenerate=regenerate,
+    )
     return _to_content_response(record, topic.topic_name)
 
 

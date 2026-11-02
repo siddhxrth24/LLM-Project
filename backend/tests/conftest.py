@@ -17,6 +17,8 @@ _TEST_RUNTIME_DIR = Path(_TEST_RUNTIME.name)
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["UPLOAD_DIR"] = str(_TEST_RUNTIME_DIR / "uploads")
 os.environ["CHROMA_DIR"] = str(_TEST_RUNTIME_DIR / "chroma")
+os.environ["LLM_MODEL_PATH"] = str(_TEST_RUNTIME_DIR / "models" / "llm")
+os.environ["EMBEDDING_MODEL_PATH"] = str(_TEST_RUNTIME_DIR / "models" / "embeddings")
 
 from app.core.database import Base, get_db
 from app.main import app

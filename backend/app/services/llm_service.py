@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from typing import Any, Optional, TypeVar
 
 from pydantic import BaseModel
@@ -8,6 +9,26 @@ from app.core.config import settings
 from app.core.logging_config import logger
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class GenerationTimeoutError(TimeoutError):
+    """Raised when decoding exceeds its configured wall-clock deadline."""
+
+
+class _GenerationDeadline:
+    def __init__(self, deadline: float, torch_module: Any) -> None:
+        self.deadline = deadline
+        self.torch = torch_module
+        self.timed_out = False
+
+    def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> Any:
+        self.timed_out = self.timed_out or time.monotonic() >= self.deadline
+        return self.torch.full(
+            (input_ids.shape[0],),
+            self.timed_out,
+            dtype=self.torch.bool,
+            device=input_ids.device,
+        )
 
 
 class LLMService:
@@ -20,6 +41,52 @@ class LLMService:
         self.tokenizer: Any = None
         self.lora_loaded: bool = False
         self.active_adapter_path: Optional[str] = None
+        self.model_context_limit: Optional[int] = None
+
+    @staticmethod
+    def _validate_model_files(local_path) -> None:
+        if not (local_path / "config.json").is_file():
+            raise FileNotFoundError(f"Model configuration is missing from {local_path}.")
+        if not any(
+            (local_path / filename).is_file()
+            for filename in ("tokenizer.json", "tokenizer_config.json", "tokenizer.model")
+        ):
+            raise FileNotFoundError(f"Tokenizer files are missing from {local_path}.")
+        has_weights = any(local_path.glob("*.safetensors")) or any(
+            local_path.glob("pytorch_model*.bin")
+        ) or any(local_path.glob("model*.bin"))
+        if not has_weights:
+            raise FileNotFoundError(f"Model weight files are missing from {local_path}.")
+
+    def _text_config(self) -> Any:
+        config = getattr(self.model, "config", None)
+        return getattr(config, "text_config", config)
+
+    def _context_limit(self) -> Optional[int]:
+        config = self._text_config()
+        value = getattr(config, "max_position_embeddings", None)
+        if value is None:
+            value = getattr(config, "max_sequence_length", None)
+        return int(value) if value else None
+
+    def _uses_gqa(self) -> bool:
+        config = self._text_config()
+        attention_heads = getattr(config, "num_attention_heads", None)
+        key_value_heads = getattr(config, "num_key_value_heads", None)
+        return bool(
+            attention_heads
+            and key_value_heads
+            and int(key_value_heads) < int(attention_heads)
+        )
+
+    def _cpu_safe_limits(self) -> tuple[Optional[int], Optional[float]]:
+        if not settings.LLM_CPU_SAFE_PROFILE or not self._uses_gqa():
+            return None, None
+        token_limit = int(settings.LLM_CPU_SAFE_MAX_NEW_TOKENS)
+        timeout = float(settings.LLM_CPU_SAFE_TIMEOUT_SECONDS)
+        if token_limit <= 0 or timeout <= 0:
+            raise ValueError("CPU-safe token and timeout limits must be positive.")
+        return min(token_limit, settings.MAX_NEW_TOKENS), timeout
 
     @classmethod
     def get_instance(cls) -> "LLMService":
@@ -50,7 +117,21 @@ class LLMService:
         logger.info(f"Loading LLM model from '{local_path}' (CPU inference)...")
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+            self._validate_model_files(local_path)
+            model_config = AutoConfig.from_pretrained(
+                str(local_path),
+                trust_remote_code=True,
+                local_files_only=True,
+            )
+            text_config = getattr(model_config, "text_config", model_config)
+            context_limit = getattr(text_config, "max_position_embeddings", None)
+            if context_limit and not 0 < settings.CONTEXT_WINDOW <= int(context_limit):
+                raise ValueError(
+                    f"CONTEXT_WINDOW={settings.CONTEXT_WINDOW} exceeds the model limit "
+                    f"of {context_limit} tokens."
+                )
 
             self.tokenizer = AutoTokenizer.from_pretrained(
                 str(local_path),
@@ -62,12 +143,14 @@ class LLMService:
 
             self.model = AutoModelForCausalLM.from_pretrained(
                 str(local_path),
+                config=model_config,
                 torch_dtype=torch.float32,
                 device_map="cpu",
                 trust_remote_code=True,
                 local_files_only=True,
             )
             self.model.eval()
+            self.model_context_limit = self._context_limit()
 
             # Load LoRA adapter if configured and enabled
             if settings.LORA_ENABLED and settings.resolved_lora_path:
@@ -82,6 +165,7 @@ class LLMService:
             )
             self.model = None
             self.tokenizer = None
+            self.model_context_limit = None
             return False
 
     def load_lora_adapter(self, adapter_path: str) -> bool:
@@ -109,6 +193,7 @@ class LLMService:
         prompt: str,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        deadline: Optional[float] = None,
     ) -> str:
         """
         Generate text output from the model using tokenization and model.generate().
@@ -121,6 +206,9 @@ class LLMService:
                     f"LLM model is not loaded. Model not found at '{settings.resolved_llm_model_path}'. "
                     f"Please download the model files for offline inference."
                 )
+
+        if settings.CONTEXT_WINDOW <= 0:
+            raise ValueError("CONTEXT_WINDOW must be a positive token count.")
 
         import torch
 
@@ -146,7 +234,16 @@ class LLMService:
         attention_mask = inputs.attention_mask.to("cpu")
         input_len = input_ids.shape[1]
 
+        context_limit = self.model_context_limit or self._context_limit()
+        if context_limit is not None and input_len >= context_limit:
+            raise ValueError(
+                f"The prompt uses {input_len} tokens, leaving no room in the model's "
+                f"{context_limit}-token context window for a response."
+            )
+
         max_new = max_tokens or settings.MAX_NEW_TOKENS
+        if context_limit is not None:
+            max_new = min(max_new, context_limit - input_len)
         temp = temperature if temperature is not None else settings.TEMPERATURE
         do_sample = temp > 0.0
 
@@ -161,8 +258,20 @@ class LLMService:
             gen_kwargs["temperature"] = temp
             gen_kwargs["top_p"] = settings.TOP_P
 
+        deadline_criteria = None
+        if deadline is not None:
+            from transformers import StoppingCriteriaList
+
+            deadline_criteria = _GenerationDeadline(deadline, torch)
+            gen_kwargs["stopping_criteria"] = StoppingCriteriaList([deadline_criteria])
+
         with torch.no_grad():
             outputs = self.model.generate(**gen_kwargs)
+
+        if deadline_criteria and deadline_criteria.timed_out:
+            raise GenerationTimeoutError("Local model generation exceeded its time limit.")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise GenerationTimeoutError("Local model generation exceeded its time limit.")
 
         new_tokens = outputs[0][input_len:]
         response_text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
@@ -184,12 +293,28 @@ class LLMService:
             f"Do not include any intro text, markdown explanation, or trailing comments.\n"
             f"JSON Schema:\n{schema_json}\n"
         )
+        safe_token_limit, safe_timeout = self._cpu_safe_limits()
+        if safe_token_limit is not None:
+            instruction += (
+                "CPU output budget is limited. Keep every field concise, include all schema keys, "
+                "and use short answers while preserving exactly three practice questions.\n"
+            )
 
         last_error = ""
         current_prompt = instruction
+        deadline = time.monotonic() + safe_timeout if safe_timeout is not None else None
 
         for attempt in range(max_retries + 1):
-            raw_output = self.generate(current_prompt, temperature=0.1)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise GenerationTimeoutError(
+                    "Structured generation exceeded its total time limit."
+                )
+            raw_output = self.generate(
+                current_prompt,
+                temperature=0.1,
+                max_tokens=safe_token_limit,
+                deadline=deadline,
+            )
 
             # Extract json substring
             json_str = self._extract_json_string(raw_output)

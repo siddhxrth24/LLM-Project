@@ -32,7 +32,10 @@ class EmbeddingService:
 
             chroma_dir = settings.resolved_chroma_dir
             chroma_dir.mkdir(parents=True, exist_ok=True)
-            self._chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
+            self._chroma_client = chromadb.PersistentClient(
+                path=str(chroma_dir),
+                settings=chromadb.config.Settings(anonymized_telemetry=False),
+            )
             self._collection = self._chroma_client.get_or_create_collection(
                 name=self.collection_name,
                 metadata={"hnsw:space": "cosine"},

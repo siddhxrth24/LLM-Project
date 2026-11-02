@@ -13,7 +13,16 @@ def test_chroma_initialization_disables_telemetry(monkeypatch, tmp_path) -> None
             return collection
 
     chromadb = ModuleType("chromadb")
-    chromadb.PersistentClient = lambda **_: FakeClient()
+    client_options = {}
+
+    def create_client(**kwargs):
+        client_options.update(kwargs)
+        return FakeClient()
+
+    chromadb.PersistentClient = create_client
+    chromadb.config = SimpleNamespace(
+        Settings=lambda **kwargs: SimpleNamespace(**kwargs)
+    )
     monkeypatch.setitem(sys.modules, "chromadb", chromadb)
     monkeypatch.setattr(
         "app.services.embedding_service.settings",
@@ -28,4 +37,5 @@ def test_chroma_initialization_disables_telemetry(monkeypatch, tmp_path) -> None
     service._init_chroma()
 
     assert os.environ["ANONYMIZED_TELEMETRY"] == "False"
+    assert client_options["settings"].anonymized_telemetry is False
     assert service._collection is collection

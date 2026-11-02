@@ -1,5 +1,12 @@
+import json
+
+import pytest
+from fastapi import HTTPException
+from types import SimpleNamespace
+
 from app.models.models import Course, SyllabusTopic
 from app.schemas.topic import LessonContent
+from app.services.llm_service import GenerationTimeoutError, LLMService
 
 
 class FakeLLMService:
@@ -95,3 +102,81 @@ def test_lesson_with_retrieval_preserves_page_citation(
         }
     ]
     assert "lecture-notes.pdf, Page 4" in llm.prompt
+
+
+def test_generation_timeout_does_not_cache_partial_lesson(
+    db_session,
+    test_course: Course,
+    monkeypatch,
+) -> None:
+    import app.services.teaching_service as teaching_service
+
+    topic = create_topic(db_session, test_course)
+
+    class TimedOutLLM(FakeLLMService):
+        def generate_structured(self, **_kwargs):
+            raise GenerationTimeoutError("Timed out during generation")
+
+    monkeypatch.setattr(teaching_service, "get_llm_service", TimedOutLLM)
+    monkeypatch.setattr(teaching_service, "hybrid_search", lambda **_: [])
+
+    with pytest.raises(HTTPException) as error:
+        teaching_service.generate_topic_content(topic.id, db_session)
+
+    assert error.value.status_code == 504
+    assert db_session.query(teaching_service.TopicContent).filter_by(
+        topic_id=topic.id
+    ).first() is None
+
+
+def test_cpu_safe_prompt_requires_concise_complete_json(monkeypatch) -> None:
+    import app.services.llm_service as llm_module
+
+    monkeypatch.setattr(
+        llm_module,
+        "settings",
+        SimpleNamespace(
+            LLM_CPU_SAFE_PROFILE=True,
+            LLM_CPU_SAFE_MAX_NEW_TOKENS=512,
+            LLM_CPU_SAFE_TIMEOUT_SECONDS=300,
+            MAX_NEW_TOKENS=1024,
+        ),
+    )
+    service = LLMService()
+    service.model = SimpleNamespace(
+        config=SimpleNamespace(
+            text_config=SimpleNamespace(
+                num_attention_heads=8,
+                num_key_value_heads=2,
+            )
+        )
+    )
+    captured = {}
+
+    def fake_generate(prompt, *, max_tokens, temperature, deadline):
+        captured.update(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            deadline=deadline,
+        )
+        return json.dumps(
+            {
+                "definition": "A graph has vertices and edges.",
+                "explanation": "Vertices are joined by edges.",
+                "analogy": "Cities connected by roads.",
+                "worked_example": "Connect three cities using edges.",
+                "misconceptions": [],
+                "practice_questions": [],
+                "source_supported_points": [],
+                "supplemental_notes": "Supplemental overview.",
+            }
+        )
+
+    service.generate = fake_generate
+    service.generate_structured("Teach graph theory", LessonContent, max_retries=0)
+
+    assert captured["max_tokens"] == 512
+    assert captured["deadline"] is not None
+    assert "include all schema keys" in captured["prompt"]
+    assert "exactly three practice questions" in captured["prompt"]

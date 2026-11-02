@@ -52,6 +52,16 @@ uv run python scripts/download_models.py
 
 The API can run without model files, but embedding, coverage, and lesson-generation features may be unavailable or degraded. Fine-tuning is an optional development workflow and is not required for normal use.
 
+For slow grouped-query models on CPU, add the following to `.env` to enable the bounded inference profile:
+
+```dotenv
+LLM_CPU_SAFE_PROFILE=true
+LLM_CPU_SAFE_MAX_NEW_TOKENS=192
+LLM_CPU_SAFE_TIMEOUT_SECONDS=180
+```
+
+The profile is opt-in and applies only to models detected as using grouped-query attention. It caps structured output and total retry time; a timeout returns an error and does not cache partial output. Benchmark token limits on your machine before increasing them. Smaller or non-GQA models retain the normal generation budget.
+
 ## Tests
 
 ```powershell

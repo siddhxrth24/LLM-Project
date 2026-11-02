@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.core.logging_config import logger
 from app.models.models import SyllabusTopic, TopicContent
 from app.schemas.topic import LessonContent, PracticeQuestion, SourceReference
-from app.services.llm_service import get_llm_service
+from app.services.llm_service import GenerationTimeoutError, get_llm_service
 from app.services.retrieval_service import format_context, hybrid_search
 
 
@@ -107,6 +107,11 @@ def generate_topic_content(
             max_retries=1,
         )
     except Exception as exc:
+        if isinstance(exc, GenerationTimeoutError):
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=str(exc),
+            ) from exc
         logger.error(f"Failed to generate structured lesson for topic {topic_id}: {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

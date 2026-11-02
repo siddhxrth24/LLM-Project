@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     TEMPERATURE: float = 0.7
     TOP_P: float = 0.9
     CONTEXT_WINDOW: int = 2048
+    LLM_CPU_SAFE_PROFILE: bool = False
+    LLM_CPU_SAFE_MAX_NEW_TOKENS: int = 512
+    LLM_CPU_SAFE_TIMEOUT_SECONDS: float = 300.0
 
     # Fine-tuning defaults
     FINETUNE_BATCH_SIZE: int = 1
