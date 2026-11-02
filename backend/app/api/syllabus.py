@@ -1,21 +1,87 @@
+import tempfile
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.models import Course, SyllabusTopic
 from app.schemas.syllabus import (
     CoverageAnalysisResponse,
+    SyllabusTextExtractionResponse,
     SyllabusTopicResponse,
     SyllabusTopicUpdate,
 )
+from app.services.extraction_service import extract_pdf
 from app.services.syllabus_service import (
     analyze_coverage,
     get_coverage_summary,
 )
 
 router = APIRouter(prefix="/api/syllabus", tags=["syllabus"])
+MAX_SYLLABUS_FILE_BYTES = 10 * 1024 * 1024
+
+
+@router.post("/extract", response_model=SyllabusTextExtractionResponse)
+async def extract_syllabus_file(
+    file: UploadFile = File(...),
+) -> SyllabusTextExtractionResponse:
+    """Extract editable syllabus text from a UTF-8 text file or PDF."""
+    filename = file.filename or ""
+    extension = Path(filename).suffix.lower()
+    if extension not in {".txt", ".pdf"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported syllabus file. Upload a PDF or UTF-8 text file.",
+        )
+
+    content = await file.read(MAX_SYLLABUS_FILE_BYTES + 1)
+    if len(content) > MAX_SYLLABUS_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Syllabus files must be 10 MB or smaller.",
+        )
+
+    page_count = 0
+    if extension == ".txt":
+        try:
+            extracted_text = content.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Text syllabus files must use UTF-8 encoding.",
+            ) from exc
+    else:
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temporary_file:
+                temporary_file.write(content)
+                temporary_path = Path(temporary_file.name)
+            extracted_pages = extract_pdf(temporary_path)
+            page_count = len(extracted_pages)
+            extracted_text = "\n\n".join(page_text for _, page_text in extracted_pages)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Could not extract text from this PDF. Check that it is readable or has OCR text.",
+            ) from exc
+        finally:
+            if temporary_path:
+                temporary_path.unlink(missing_ok=True)
+
+    extracted_text = extracted_text.strip()
+    if not extracted_text:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No text was found in the syllabus file. Use a text-based PDF or UTF-8 text file.",
+        )
+
+    return SyllabusTextExtractionResponse(
+        filename=filename,
+        text=extracted_text,
+        page_count=page_count,
+    )
 
 
 def _to_topic_response(topic: SyllabusTopic) -> SyllabusTopicResponse:

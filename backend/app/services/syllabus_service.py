@@ -144,17 +144,11 @@ def parse_syllabus(
         parsed_topics = parse_syllabus_heuristic(syllabus_text)
         logger.info(f"Heuristic parser extracted {len(parsed_topics)} topics.")
 
-    # Fallback default if completely empty
     if not parsed_topics:
-        parsed_topics = [
-            LLMParsedTopic(
-                unit_number=1,
-                topic_name="Course Overview & Core Concepts",
-                subtopics=["Fundamental definitions", "Foundational principles"],
-                estimated_hours=2.0,
-                difficulty=2,
-            )
-        ]
+        raise ValueError(
+            "No syllabus topics could be recognized. Add unit headings and topic names, "
+            "for example 'Unit 1: Foundations' or '- Topic name'."
+        )
 
     # Clean existing syllabus topics for course
     db.query(SyllabusTopic).filter(SyllabusTopic.course_id == course_id).delete()
@@ -181,10 +175,6 @@ def parse_syllabus(
     course = db.query(Course).filter(Course.id == course_id).first()
     if course:
         course.syllabus_text = syllabus_text
-
-    db.commit()
-    for t in created_topics:
-        db.refresh(t)
 
     return created_topics
 

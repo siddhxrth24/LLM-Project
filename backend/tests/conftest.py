@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -31,11 +31,22 @@ test_engine = create_engine(
     poolclass=StaticPool,
 )
 
+
+@event.listens_for(test_engine, "connect")
+def _disable_sqlite_legacy_transactions(dbapi_connection, _) -> None:
+    dbapi_connection.isolation_level = None
+
+
+@event.listens_for(test_engine, "begin")
+def _begin_sqlite_transaction(connection) -> None:
+    connection.exec_driver_sql("BEGIN")
+
 TestingSessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
     bind=test_engine,
     expire_on_commit=False,
+    join_transaction_mode="create_savepoint",
 )
 
 

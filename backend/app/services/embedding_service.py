@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -25,6 +26,7 @@ class EmbeddingService:
 
     def _init_chroma(self) -> None:
         """Initialize ChromaDB client with persistent local storage."""
+        os.environ["ANONYMIZED_TELEMETRY"] = "False"
         try:
             import chromadb
 
@@ -173,6 +175,18 @@ class EmbeddingService:
             return True
         except Exception as exc:
             logger.error(f"Error deleting Chroma chunks for document {document_id}: {exc}")
+            return False
+
+    def delete_course_chunks(self, course_id: int) -> bool:
+        """Remove all vectors associated with a course from ChromaDB."""
+        if self._collection is None:
+            return True
+        try:
+            self._collection.delete(where={"course_id": int(course_id)})
+            logger.info(f"Deleted ChromaDB vectors for course {course_id}")
+            return True
+        except Exception as exc:
+            logger.error(f"Error deleting Chroma chunks for course {course_id}: {exc}")
             return False
 
     def search_dense(

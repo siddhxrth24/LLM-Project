@@ -3,6 +3,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.core.logging_config import logger
+from app.models.models import Chunk
 from app.services.embedding_service import get_embedding_service
 from app.services.keyword_service import search_keyword
 
@@ -58,6 +59,33 @@ def reciprocal_rank_fusion(
     return fused_results
 
 
+def _restore_chunk_locations(
+    db: Session,
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    chunk_ids = {
+        int(item["chunk_id"])
+        for item in results
+        if item.get("chunk_id") is not None
+    }
+    if not chunk_ids:
+        return results
+
+    locations = {
+        chunk_id: (page_number, slide_number)
+        for chunk_id, page_number, slide_number in db.query(
+            Chunk.id, Chunk.page_number, Chunk.slide_number
+        )
+        .filter(Chunk.id.in_(chunk_ids))
+        .all()
+    }
+    for item in results:
+        location = locations.get(item.get("chunk_id"))
+        if location:
+            item["page_number"], item["slide_number"] = location
+    return results
+
+
 def hybrid_search(
     db: Session,
     query: str,
@@ -82,6 +110,7 @@ def hybrid_search(
             unit_id=unit_id,
             top_k=top_k * 2,
         )
+        keyword_results = _restore_chunk_locations(db, keyword_results)
     except Exception as exc:
         logger.warning(f"Keyword search error in hybrid_search: {exc}")
 

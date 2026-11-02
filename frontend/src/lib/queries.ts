@@ -121,6 +121,12 @@ export interface SyllabusTopicUpdateInput {
   user_override_status?: 'covered' | 'partially_covered' | 'not_found' | 'needs_review' | null;
 }
 
+export interface SyllabusTextExtractionResponse {
+  filename: string;
+  text: string;
+  page_count: number;
+}
+
 export interface CoverageData {
   course_id: number;
   total_topics: number;
@@ -310,6 +316,9 @@ export function useUpdateCourse() {
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['courses'] });
       queryClient.invalidateQueries({ queryKey: ['courses', variables.id] });
+      queryClient.invalidateQueries({ queryKey: ['syllabus', 'topics'] });
+      queryClient.invalidateQueries({ queryKey: ['syllabus', 'coverage'] });
+      queryClient.invalidateQueries({ queryKey: ['schedule'] });
     },
   });
 }
@@ -414,6 +423,17 @@ export function useSyllabusTopics(courseId: number | string | undefined) {
       return response.data;
     },
     enabled: Boolean(courseId),
+  });
+}
+
+export function useExtractSyllabusFile() {
+  return useMutation<SyllabusTextExtractionResponse, Error, FormData>({
+    mutationFn: async (formData) => {
+      const response = await api.post('/syllabus/extract', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      return response.data;
+    },
   });
 }
 

@@ -18,6 +18,12 @@ class SyllabusParseRequest(BaseModel):
     )
 
 
+class SyllabusTextExtractionResponse(BaseModel):
+    filename: str
+    text: str
+    page_count: int = 0
+
+
 class SyllabusTopicCreate(BaseModel):
     """Schema for manually creating a syllabus topic."""
 

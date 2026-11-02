@@ -25,6 +25,7 @@ import {
   useCreateCourse,
   useUpdateCourse,
   useDeleteCourse,
+  useExtractSyllabusFile,
   Course,
   CourseCreateInput,
   CourseUpdateInput,
@@ -63,10 +64,15 @@ export function CourseForm() {
   const { data: existingCourse, isLoading: isFetchingCourse } = useCourse(id);
   const createMutation = useCreateCourse();
   const updateMutation = useUpdateCourse();
+  const extractSyllabusMutation = useExtractSyllabusFile();
+  const syllabusFileInput = React.useRef<HTMLInputElement | null>(null);
 
   // Form State
   const [name, setName] = React.useState('');
   const [syllabusText, setSyllabusText] = React.useState('');
+  const [syllabusFilename, setSyllabusFilename] = React.useState('');
+  const [syllabusPageCount, setSyllabusPageCount] = React.useState(0);
+  const [syllabusUploadError, setSyllabusUploadError] = React.useState<string | null>(null);
   const [examDate, setExamDate] = React.useState('');
   const [studyDaysPerWeek, setStudyDaysPerWeek] = React.useState<number>(5);
   const [dailyStudyHours, setDailyStudyHours] = React.useState<number>(2);
@@ -116,6 +122,26 @@ export function CourseForm() {
     return Object.keys(errors).length === 0;
   };
 
+  const handleSyllabusFile = async (file?: File) => {
+    if (!file) return;
+    setSyllabusUploadError(null);
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const result = await extractSyllabusMutation.mutateAsync(formData);
+      setSyllabusText(result.text);
+      setSyllabusFilename(result.filename);
+      setSyllabusPageCount(result.page_count);
+    } catch (error) {
+      setSyllabusUploadError(
+        error instanceof Error ? error.message : 'Could not extract text from this syllabus file.'
+      );
+    } finally {
+      if (syllabusFileInput.current) syllabusFileInput.current.value = '';
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitError(null);
@@ -153,7 +179,8 @@ export function CourseForm() {
     return <LoadingSpinner text="Loading course details..." fullHeight />;
   }
 
-  const isSubmitting = createMutation.isPending || updateMutation.isPending;
+  const isSubmitting =
+    createMutation.isPending || updateMutation.isPending || extractSyllabusMutation.isPending;
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 pb-12">
@@ -248,7 +275,40 @@ export function CourseForm() {
               </Badge>
             </div>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <input
+                ref={syllabusFileInput}
+                type="file"
+                accept=".pdf,.txt,application/pdf,text/plain"
+                className="hidden"
+                onChange={(event) => void handleSyllabusFile(event.target.files?.[0])}
+                disabled={isSubmitting}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                onClick={() => syllabusFileInput.current?.click()}
+                disabled={isSubmitting}
+              >
+                <UploadCloud className="h-4 w-4" />
+                {extractSyllabusMutation.isPending ? 'Extracting text...' : 'Upload syllabus'}
+              </Button>
+              <span className="text-xs text-gray-500">
+                PDF or UTF-8 TXT, up to 10 MB
+              </span>
+              {syllabusFilename && !extractSyllabusMutation.isPending && (
+                <span className="text-xs font-medium text-emerald-700">
+                  Loaded {syllabusFilename}
+                  {syllabusPageCount > 0 ? ` (${syllabusPageCount} pages)` : ''}
+                </span>
+              )}
+            </div>
+            {syllabusUploadError && (
+              <p role="alert" className="text-xs text-red-600">{syllabusUploadError}</p>
+            )}
             <Textarea
               id="syllabusText"
               rows={9}

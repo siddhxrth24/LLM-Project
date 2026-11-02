@@ -1,4 +1,5 @@
 import shutil
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,6 +18,8 @@ from app.schemas.course import (
 )
 from app.schemas.syllabus import SyllabusParseRequest, SyllabusTopicResponse
 from app.services.syllabus_service import parse_syllabus
+from app.services.embedding_service import get_embedding_service
+from app.services.keyword_service import delete_course_chunks as delete_course_fts
 
 router = APIRouter(prefix="/api/courses", tags=["courses"])
 
@@ -76,26 +79,28 @@ async def create_course(payload: CourseCreate, db: Session = Depends(get_db)) ->
         difficulty_preference=payload.difficulty_preference,
     )
     db.add(course)
-    db.commit()
-    db.refresh(course)
+    db.flush()
 
-    # Automatically generate 5 standard academic units for the course
-    for u_num in range(1, 6):
-        unit = Unit(
-            course_id=course.id,
-            unit_number=u_num,
-            name=f"Unit {u_num}",
+    for unit_number in range(1, 6):
+        db.add(
+            Unit(
+                course_id=course.id,
+                unit_number=unit_number,
+                name=f"Unit {unit_number}",
+            )
         )
-        db.add(unit)
-    db.commit()
 
-    # If initial syllabus text was supplied, parse topics immediately
-    if payload.syllabus_text and len(payload.syllabus_text.strip()) > 10:
+    if payload.syllabus_text and payload.syllabus_text.strip():
         try:
-            parse_syllabus(payload.syllabus_text, course.id, db)
-        except Exception as exc:
-            logger.warning(f"Initial syllabus auto-parsing failed: {exc}")
+            parse_syllabus(payload.syllabus_text.strip(), course.id, db)
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
 
+    db.commit()
     db.refresh(course)
     return _build_course_response(course, db)
 
@@ -135,8 +140,27 @@ async def update_course(
         )
 
     update_data = payload.model_dump(exclude_unset=True)
+    syllabus_was_updated = "syllabus_text" in update_data
+    new_syllabus = update_data.pop("syllabus_text", None)
     for key, value in update_data.items():
         setattr(course, key, value)
+
+    if syllabus_was_updated:
+        cleaned_syllabus = new_syllabus.strip() if new_syllabus else ""
+        if cleaned_syllabus:
+            try:
+                parse_syllabus(cleaned_syllabus, course.id, db)
+            except ValueError as exc:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=str(exc),
+                ) from exc
+        else:
+            db.query(SyllabusTopic).filter(
+                SyllabusTopic.course_id == course.id
+            ).delete(synchronize_session=False)
+            course.syllabus_text = None
 
     db.commit()
     db.refresh(course)
@@ -153,16 +177,48 @@ async def delete_course(course_id: int, db: Session = Depends(get_db)) -> dict[s
             detail=f"Course {course_id} not found",
         )
 
-    # Clean course files on disk
-    course_dir = settings.resolved_upload_dir / f"course_{course_id}"
-    if course_dir.exists():
-        try:
-            shutil.rmtree(course_dir)
-        except Exception as exc:
-            logger.warning(f"Failed to delete course directory {course_dir}: {exc}")
+    try:
+        vectors_deleted = get_embedding_service().delete_course_chunks(course_id)
+    except Exception as exc:
+        logger.error(f"Failed deleting vectors for course {course_id}: {exc}")
+        vectors_deleted = False
+    if not vectors_deleted:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vector cleanup failed; the course was not deleted.",
+        )
 
-    db.delete(course)
-    db.commit()
+    course_dir = settings.resolved_upload_dir / f"course_{course_id}"
+    quarantined_dir = course_dir.with_name(
+        f".{course_dir.name}.{uuid.uuid4().hex}.deleting"
+    )
+    try:
+        if course_dir.exists():
+            course_dir.replace(quarantined_dir)
+
+        delete_course_fts(db, course_id)
+        db.delete(course)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        if quarantined_dir.exists():
+            try:
+                quarantined_dir.replace(course_dir)
+            except OSError as restore_exc:
+                logger.error(
+                    f"Failed to restore course directory {course_dir}: {restore_exc}"
+                )
+        logger.error(f"Failed to delete course {course_id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Course cleanup failed; the database record was retained.",
+        ) from exc
+
+    if quarantined_dir.exists():
+        try:
+            shutil.rmtree(quarantined_dir)
+        except OSError as exc:
+            logger.warning(f"Could not remove quarantined course directory: {exc}")
     return {"message": "Course deleted successfully", "id": course_id}
 
 
@@ -180,7 +236,21 @@ async def upload_syllabus(
             detail=f"Course {course_id} not found",
         )
 
-    topics = parse_syllabus(payload.syllabus_text, course_id, db)
+    try:
+        topics = parse_syllabus(payload.syllabus_text, course_id, db)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+    for topic in topics:
+        db.refresh(topic)
 
     response_list: list[SyllabusTopicResponse] = []
     for t in topics:

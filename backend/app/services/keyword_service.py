@@ -94,23 +94,44 @@ def index_chunks_batch(db: Session, chunks_data: list[dict[str, Any]]) -> None:
 def delete_chunks(db: Session, document_id: int) -> None:
     """Remove all FTS5 index entries associated with a document ID."""
     try:
-        # Look up chunk ids belonging to document
-            db.execute(
-                text(
-                    """
-                    DELETE FROM document_fts
-                    WHERE chunk_id IN (
-                        SELECT CAST(id AS TEXT) FROM chunks WHERE document_id = :document_id
-                    )
-                    OR chunk_id NOT IN (SELECT CAST(id AS TEXT) FROM chunks)
-                    """
-                ),
-                {"document_id": document_id},
-            )
-            logger.info(f"Deleted FTS5 entries for document {document_id}")
+        db.execute(
+            text(
+                """
+                DELETE FROM document_fts
+                WHERE chunk_id IN (
+                    SELECT CAST(id AS TEXT) FROM chunks WHERE document_id = :document_id
+                )
+                OR chunk_id NOT IN (SELECT CAST(id AS TEXT) FROM chunks)
+                """
+            ),
+            {"document_id": document_id},
+        )
     except Exception as exc:
         db.rollback()
         logger.error(f"Failed to delete FTS5 chunks for document {document_id}: {exc}")
+        raise
+
+
+def delete_course_chunks(db: Session, course_id: int) -> None:
+    """Remove a course's FTS entries and any orphaned chunk entries."""
+    try:
+        db.execute(
+            text(
+                """
+                DELETE FROM document_fts
+                WHERE course_id = :course_id
+                OR chunk_id IN (
+                    SELECT CAST(id AS TEXT) FROM chunks WHERE course_id = :course_id
+                )
+                OR chunk_id NOT IN (SELECT CAST(id AS TEXT) FROM chunks)
+                """
+            ),
+            {"course_id": str(course_id)},
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.error(f"Failed to delete FTS5 chunks for course {course_id}: {exc}")
+        raise
 
 
 def search_keyword(

@@ -1,9 +1,11 @@
 import io
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
-from app.models.models import Course, SyllabusTopic
+from app.models.models import Chunk, Course, Document, SyllabusTopic, Unit
 from app.main import app
 from app.services.embedding_service import EmbeddingService
 from app.services.llm_service import LLMService
@@ -53,6 +55,214 @@ def test_course_crud(client: TestClient) -> None:
     # 6. Verify deleted
     get_after = client.get(f"/api/courses/{course_id}")
     assert get_after.status_code == 404
+
+
+def test_course_syllabus_create_and_update_are_consistent(client: TestClient) -> None:
+    create_response = client.post(
+        "/api/courses/",
+        json={
+            "name": "Algorithms",
+            "syllabus_text": "Unit 1: Graph Algorithms\n- Shortest Paths",
+        },
+    )
+    assert create_response.status_code == 201
+    created_course = create_response.json()
+    course_id = created_course["id"]
+    assert created_course["topic_count"] == 2
+    assert created_course["syllabus_text"].startswith("Unit 1:")
+
+    update_response = client.put(
+        f"/api/courses/{course_id}",
+        json={"syllabus_text": "Unit 1: Data Structures\n- Balanced Trees"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["topic_count"] == 2
+
+    topics_response = client.get(f"/api/syllabus/topics/{course_id}")
+    assert topics_response.status_code == 200
+    assert {topic["topic_name"] for topic in topics_response.json()} == {
+        "Data Structures", "Balanced Trees"
+    }
+
+    invalid_update = client.put(
+        f"/api/courses/{course_id}",
+        json={"name": "Should Not Persist", "syllabus_text": "!!!"},
+    )
+    assert invalid_update.status_code == 422
+    assert "No syllabus topics could be recognized" in invalid_update.json()["detail"]
+
+    unchanged_course = client.get(f"/api/courses/{course_id}").json()
+    assert unchanged_course["name"] == "Algorithms"
+    assert unchanged_course["syllabus_text"] == "Unit 1: Data Structures\n- Balanced Trees"
+    assert unchanged_course["topic_count"] == 2
+
+
+def test_course_create_rejects_unparseable_syllabus(client: TestClient) -> None:
+    response = client.post(
+        "/api/courses/",
+        json={"name": "Invalid Syllabus", "syllabus_text": "!!!"},
+    )
+
+    assert response.status_code == 422
+    assert "No syllabus topics could be recognized" in response.json()["detail"]
+    assert response.json()["error"] is True
+    assert client.get("/api/courses/").json()["total"] == 0
+
+
+def test_syllabus_file_extraction_accepts_text_and_pdf(client: TestClient) -> None:
+    text_response = client.post(
+        "/api/syllabus/extract",
+        files={"file": ("course-plan.txt", io.BytesIO(b"Unit 1: Foundations\n- Graphs"), "text/plain")},
+    )
+    assert text_response.status_code == 200
+    assert text_response.json()["filename"] == "course-plan.txt"
+    assert text_response.json()["text"] == "Unit 1: Foundations\n- Graphs"
+    assert text_response.json()["page_count"] == 0
+
+    fitz = pytest.importorskip("fitz")
+    pdf = fitz.open()
+    page = pdf.new_page()
+    page.insert_text((50, 72), "Unit 1: Probability Theory")
+    pdf_bytes = pdf.tobytes()
+    pdf.close()
+
+    pdf_response = client.post(
+        "/api/syllabus/extract",
+        files={"file": ("course-plan.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert pdf_response.status_code == 200
+    assert "Probability Theory" in pdf_response.json()["text"]
+    assert pdf_response.json()["page_count"] == 1
+
+
+def test_syllabus_file_extraction_rejects_unsupported_and_empty_files(
+    client: TestClient,
+) -> None:
+    unsupported = client.post(
+        "/api/syllabus/extract",
+        files={"file": ("syllabus.docx", io.BytesIO(b"document"), "application/octet-stream")},
+    )
+    assert unsupported.status_code == 400
+
+    empty = client.post(
+        "/api/syllabus/extract",
+        files={"file": ("empty.txt", io.BytesIO(b" \n"), "text/plain")},
+    )
+    assert empty.status_code == 422
+    assert "No text was found" in empty.json()["detail"]
+
+
+def test_course_delete_cleans_uploads_and_search_indexes(
+    client: TestClient,
+    db_session,
+    test_course: Course,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import app.api.courses as courses_api
+
+    class VectorStore:
+        def __init__(self) -> None:
+            self.deleted_course_ids: list[int] = []
+
+        def delete_course_chunks(self, course_id: int) -> bool:
+            self.deleted_course_ids.append(course_id)
+            return True
+
+    vector_store = VectorStore()
+    course_dir = tmp_path / f"course_{test_course.id}"
+    course_dir.mkdir()
+    uploaded_file = course_dir / "lecture.pdf"
+    uploaded_file.write_bytes(b"uploaded")
+    unit = db_session.query(Unit).filter_by(course_id=test_course.id).first()
+    document = Document(
+        course_id=test_course.id,
+        unit_id=unit.id,
+        filename=uploaded_file.name,
+        original_filename=uploaded_file.name,
+        file_type="pdf",
+        file_size=uploaded_file.stat().st_size,
+        file_path=str(uploaded_file),
+        status="completed",
+    )
+    db_session.add(document)
+    db_session.flush()
+    chunk = Chunk(
+        document_id=document.id,
+        course_id=test_course.id,
+        unit_id=unit.id,
+        content="course scoped searchable text",
+        chunk_index=0,
+        source_filename=uploaded_file.name,
+    )
+    db_session.add(chunk)
+    db_session.flush()
+    db_session.execute(
+        text(
+            "INSERT INTO document_fts "
+            "(chunk_id, course_id, unit_id, source_filename, page_number, content) "
+            "VALUES (:chunk_id, :course_id, :unit_id, :filename, '0', :content)"
+        ),
+        {
+            "chunk_id": str(chunk.id),
+            "course_id": str(test_course.id),
+            "unit_id": str(unit.id),
+            "filename": uploaded_file.name,
+            "content": chunk.content,
+        },
+    )
+
+    monkeypatch.setattr(courses_api, "get_embedding_service", lambda: vector_store)
+    monkeypatch.setattr(
+        courses_api,
+        "settings",
+        SimpleNamespace(resolved_upload_dir=tmp_path),
+    )
+
+    response = client.delete(f"/api/courses/{test_course.id}")
+
+    assert response.status_code == 200
+    assert db_session.get(Course, test_course.id) is None
+    assert db_session.execute(text("SELECT COUNT(*) FROM chunks")).scalar_one() == 0
+    assert db_session.execute(text("SELECT COUNT(*) FROM document_fts")).scalar_one() == 0
+    assert not course_dir.exists()
+    assert vector_store.deleted_course_ids == [test_course.id]
+
+
+def test_course_delete_aborts_when_vector_cleanup_fails(
+    client: TestClient,
+    db_session,
+    test_course: Course,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import app.api.courses as courses_api
+
+    class VectorStore:
+        def delete_course_chunks(self, _course_id: int) -> bool:
+            return False
+
+    course_dir = tmp_path / f"course_{test_course.id}"
+    course_dir.mkdir()
+    uploaded_file = course_dir / "keep.pdf"
+    uploaded_file.write_bytes(b"uploaded")
+    monkeypatch.setattr(courses_api, "get_embedding_service", VectorStore)
+    monkeypatch.setattr(
+        courses_api,
+        "settings",
+        SimpleNamespace(resolved_upload_dir=tmp_path),
+    )
+
+    response = client.delete(f"/api/courses/{test_course.id}")
+
+    assert response.status_code == 503
+    assert db_session.get(Course, test_course.id) is not None
+    assert uploaded_file.exists()
+    assert course_dir.exists()
 
 
 def test_document_upload_validation(client: TestClient, test_course: Course) -> None:
