@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from app.models.models import Course, SyllabusTopic
 from app.schemas.topic import LessonContent
 from app.services.llm_service import GenerationTimeoutError, LLMService
+from app.services.teaching_service import CompactLessonContent
 
 
 class FakeLLMService:
@@ -15,6 +16,9 @@ class FakeLLMService:
 
     def is_loaded(self) -> bool:
         return True
+
+    def cpu_safe_profile_active(self) -> bool:
+        return False
 
     def generate_structured(self, prompt, pydantic_model, max_retries=1):
         self.prompt = prompt
@@ -104,6 +108,47 @@ def test_lesson_with_retrieval_preserves_page_citation(
     assert "lecture-notes.pdf, Page 4" in llm.prompt
 
 
+def test_cpu_safe_lesson_uses_compact_schema_and_maps_to_public_lesson(
+    db_session,
+    test_course: Course,
+    monkeypatch,
+) -> None:
+    import app.services.teaching_service as teaching_service
+
+    topic = create_topic(db_session, test_course)
+
+    class CpuSafeLLM(FakeLLMService):
+        def cpu_safe_profile_active(self) -> bool:
+            return True
+
+        def generate_structured(self, prompt, pydantic_model, max_retries=1):
+            self.prompt = prompt
+            assert pydantic_model is CompactLessonContent
+            return CompactLessonContent(
+                definition="A graph contains vertices connected by edges.",
+                explanation="Vertices are connected by edges.",
+                analogy="Cities connected by roads.",
+                worked_example="Connect three vertices using two edges.",
+                misconception="Every graph must be connected.",
+                practice_question="How many edges connect three vertices in a chain?",
+                practice_answer="Two.",
+                practice_explanation="A chain connects each adjacent pair once.",
+                source_supported_point="Graphs contain vertices and edges.",
+                supplemental_notes="",
+            )
+
+    llm = CpuSafeLLM()
+    monkeypatch.setattr(teaching_service, "get_llm_service", lambda: llm)
+    monkeypatch.setattr(teaching_service, "hybrid_search", lambda **_: [])
+
+    record = teaching_service.generate_topic_content(topic.id, db_session)
+
+    assert record.content_json["definition"] == "A graph contains vertices connected by edges."
+    assert len(record.content_json["practice_questions"]) == 1
+    assert record.content_json["source_supported_points"] == []
+    assert "exactly one concise practice question" in llm.prompt
+
+
 def test_generation_timeout_does_not_cache_partial_lesson(
     db_session,
     test_course: Course,
@@ -178,5 +223,6 @@ def test_cpu_safe_prompt_requires_concise_complete_json(monkeypatch) -> None:
 
     assert captured["max_tokens"] == 512
     assert captured["deadline"] is not None
-    assert "include all schema keys" in captured["prompt"]
-    assert "exactly three practice questions" in captured["prompt"]
+    assert "every schema key" in captured["prompt"]
+    assert "exactly one concise practice question" in captured["prompt"]
+    assert "Return only the corrected compact JSON object" not in captured["prompt"]

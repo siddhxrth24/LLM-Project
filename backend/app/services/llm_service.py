@@ -88,6 +88,9 @@ class LLMService:
             raise ValueError("CPU-safe token and timeout limits must be positive.")
         return min(token_limit, settings.MAX_NEW_TOKENS), timeout
 
+    def cpu_safe_profile_active(self) -> bool:
+        return self._cpu_safe_limits()[0] is not None
+
     @classmethod
     def get_instance(cls) -> "LLMService":
         if cls._instance is None:
@@ -286,19 +289,23 @@ class LLMService:
         """
         Enforce structured JSON output matching a Pydantic schema from the LLM.
         """
-        schema_json = json.dumps(pydantic_model.model_json_schema(), indent=2)
+        schema = pydantic_model.model_json_schema()
+        schema_json = json.dumps(schema, separators=(",", ":"))
+        safe_token_limit, safe_timeout = self._cpu_safe_limits()
         instruction = (
             f"{prompt}\n\n"
             f"IMPORTANT: Respond ONLY with a valid JSON object matching the JSON Schema below. "
             f"Do not include any intro text, markdown explanation, or trailing comments.\n"
             f"JSON Schema:\n{schema_json}\n"
         )
-        safe_token_limit, safe_timeout = self._cpu_safe_limits()
         if safe_token_limit is not None:
             instruction += (
-                "CPU output budget is limited. Keep every field concise, include all schema keys, "
-                "and use short answers while preserving exactly three practice questions.\n"
+                "CPU output budget is limited. Return compact valid JSON with every schema key. "
+                "Keep each string field to one short sentence and lists to at most two short items. "
             )
+            if "practice_questions" in schema.get("properties", {}):
+                instruction += "Include exactly one concise practice question. "
+            instruction += "Do not repeat the schema or add text outside the JSON object.\n"
 
         last_error = ""
         current_prompt = instruction
@@ -311,7 +318,7 @@ class LLMService:
                 )
             raw_output = self.generate(
                 current_prompt,
-                temperature=0.1,
+                temperature=0.0 if safe_token_limit is not None else 0.1,
                 max_tokens=safe_token_limit,
                 deadline=deadline,
             )
@@ -329,9 +336,8 @@ class LLMService:
                 if attempt < max_retries:
                     current_prompt = (
                         f"{instruction}\n\n"
-                        f"Your previous response had a schema validation error: {last_error}\n"
-                        f"Previous invalid output:\n{raw_output}\n\n"
-                        f"Please produce strictly valid JSON matching the schema."
+                        f"The previous response failed validation: {last_error}. "
+                        f"Return only the corrected compact JSON object."
                     )
 
         raise ValueError(

@@ -288,7 +288,11 @@ def test_document_upload_validation(client: TestClient, test_course: Course) -> 
     assert docs[0]["original_filename"] == "lecture_slides.pdf"
 
 
-def test_system_settings_and_missing_model_handling(client: TestClient, test_course: Course) -> None:
+def test_system_settings_and_missing_model_handling(
+    client: TestClient,
+    test_course: Course,
+    monkeypatch,
+) -> None:
     """Verify system diagnostics and graceful error handling when ML models are absent."""
     # 1. System status endpoint
     status_resp = client.get("/api/settings/status")
@@ -306,6 +310,7 @@ def test_system_settings_and_missing_model_handling(client: TestClient, test_cou
     assert "embedding_model_id" in models_info
 
     # 3. Calling ML generation when model weights are not loaded locally
+    monkeypatch.setattr(LLMService, "load_model", lambda self: False)
     # Add a mock topic
     topic_payload = {
         "unit_number": 1,
