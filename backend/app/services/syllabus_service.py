@@ -1,3 +1,4 @@
+import math
 import re
 from typing import Any, Optional
 
@@ -15,11 +16,11 @@ from app.services.retrieval_service import hybrid_search
 
 
 class LLMParsedTopic(BaseModel):
-    unit_number: int = Field(default=1, ge=1, le=10)
-    topic_name: str
-    subtopics: list[str] = Field(default_factory=list)
+    unit_number: int = Field(default=1, ge=1, le=5)
+    topic_name: str = Field(..., min_length=1, max_length=255)
+    subtopics: list[str] = Field(default_factory=list, max_length=100)
     prerequisites: list[str] = Field(default_factory=list)
-    estimated_hours: float = Field(default=2.0, gt=0.0)
+    estimated_hours: float = Field(default=2.0, gt=0.0, le=50.0)
     difficulty: int = Field(default=3, ge=1, le=5)
 
 
@@ -51,7 +52,7 @@ def parse_syllabus_heuristic(syllabus_text: str) -> list[LLMParsedTopic]:
     for line in lines:
         # Detect unit header: "Unit 1:", "Module II -", etc.
         unit_match = re.match(
-            r"^(?:Unit|Module|Chapter|Part)\s+([0-9IVX]+)[\s:.-]*(.*)$",
+            r"^(?:Unit|Module|Chapter|Part)\s+(?:No\.?\s*)?([0-9]+|[IVX]+)\s*[:.\-–—]?\s*(.*)$",
             line,
             re.IGNORECASE,
         )
@@ -61,6 +62,12 @@ def parse_syllabus_heuristic(syllabus_text: str) -> list[LLMParsedTopic]:
                 current_unit = int(u_str)
             elif u_str in roman_map:
                 current_unit = roman_map[u_str]
+            else:
+                raise ValueError(f"Unsupported syllabus unit number '{u_str}'. Use units 1 to 5.")
+            if not 1 <= current_unit <= 5:
+                raise ValueError(
+                    f"Syllabus unit number {current_unit} is outside the supported range 1 to 5."
+                )
             remainder = unit_match.group(2).strip()
             if remainder and len(remainder) > 3:
                 # Header also includes topic name
@@ -123,6 +130,9 @@ def parse_syllabus(
     Parse unstructured syllabus text into structured SyllabusTopic database records.
     Uses LLM structured generation when available, falling back to heuristic parsing.
     """
+    if not syllabus_text or not syllabus_text.strip():
+        raise ValueError("Syllabus text cannot be empty.")
+
     llm = get_llm_service()
     parsed_topics: list[LLMParsedTopic] = []
 
@@ -150,11 +160,44 @@ def parse_syllabus(
             "for example 'Unit 1: Foundations' or '- Topic name'."
         )
 
+    # Validate and normalize generated output before replacing any existing topics.
+    cleaned_topics: list[LLMParsedTopic] = []
+    seen: set[tuple[int, str]] = set()
+    for topic in parsed_topics:
+        name = " ".join(topic.topic_name.split()).strip(" -–—:;,.\t")
+        if not name:
+            continue
+        if len(name) > 255:
+            name = name[:255].rstrip()
+        if not math.isfinite(topic.estimated_hours):
+            continue
+        key = (topic.unit_number, name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        subtopics = list(
+            dict.fromkeys(
+                cleaned
+                for value in topic.subtopics
+                if isinstance(value, str)
+                if (cleaned := " ".join(value.split()).strip())
+            )
+        )
+        cleaned_topics.append(
+            topic.model_copy(update={"topic_name": name, "subtopics": subtopics})
+        )
+
+    if not cleaned_topics:
+        raise ValueError(
+            "The syllabus parser did not return any usable topic names. "
+            "Review the syllabus and try again."
+        )
+
     # Clean existing syllabus topics for course
     db.query(SyllabusTopic).filter(SyllabusTopic.course_id == course_id).delete()
 
     created_topics: list[SyllabusTopic] = []
-    for idx, pt in enumerate(parsed_topics):
+    for idx, pt in enumerate(cleaned_topics):
         topic_record = SyllabusTopic(
             course_id=course_id,
             unit_number=pt.unit_number,

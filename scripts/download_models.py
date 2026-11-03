@@ -56,6 +56,7 @@ def download_llm(model_id: str, output_dir: str):
             device_map=None,
         )
         model.save_pretrained(str(output_path))
+        del model
         
         logger.info(f"LLM downloaded successfully to: {output_path.resolve()}")
         
@@ -72,9 +73,9 @@ def download_llm(model_id: str, output_dir: str):
         # Quick test
         inputs = test_tokenizer("Hello", return_tensors="pt")
         outputs = test_model.generate(**inputs, max_new_tokens=5)
-        logger.info("LLM verification: PASSED ✓")
+        logger.info("LLM verification: PASSED")
         
-        del model, test_model, test_tokenizer
+        del test_model, test_tokenizer
         
     except Exception as e:
         logger.error(f"Failed to download LLM: {e}")
@@ -107,7 +108,7 @@ def download_embedding_model(model_id: str, output_dir: str):
         test_model = SentenceTransformer(str(output_path))
         test_embedding = test_model.encode(["test sentence"])
         assert test_embedding.shape[1] > 0, "Embedding dimension is 0"
-        logger.info(f"Embedding verification: PASSED ✓ (dim={test_embedding.shape[1]})")
+        logger.info(f"Embedding verification: PASSED (dim={test_embedding.shape[1]})")
         
         del model, test_model
         
@@ -143,10 +144,11 @@ After download, set these in your .env file:
                         help="Embedding model ID")
     parser.add_argument("--embedding-dir", default="./models/embeddings",
                         help="Directory to save embedding model")
-    parser.add_argument("--llm-only", action="store_true",
-                        help="Download only the LLM")
-    parser.add_argument("--embedding-only", action="store_true",
-                        help="Download only the embedding model")
+    download_group = parser.add_mutually_exclusive_group()
+    download_group.add_argument("--llm-only", action="store_true",
+                                help="Download only the LLM")
+    download_group.add_argument("--embedding-only", action="store_true",
+                                help="Download only the embedding model")
     
     args = parser.parse_args()
     
@@ -154,7 +156,7 @@ After download, set these in your .env file:
     logger.info("SemesTrack Model Downloader")
     logger.info("=" * 60)
     logger.info("")
-    logger.info("⚠  This requires an internet connection.")
+    logger.info("NOTE: This requires an internet connection.")
     logger.info("   After download, SemesTrack runs fully offline.")
     logger.info("")
     

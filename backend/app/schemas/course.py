@@ -10,7 +10,7 @@ class UnitSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int = Field(..., description="Unique unit identifier")
-    unit_number: int = Field(..., ge=1, le=10, description="Unit index (typically 1-5)")
+    unit_number: int = Field(..., ge=1, le=5, description="Unit index (1-5)")
     name: str = Field(..., description="Unit title/name")
     document_count: int = Field(default=0, description="Number of uploaded documents in this unit")
 

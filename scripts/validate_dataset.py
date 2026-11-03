@@ -28,6 +28,10 @@ def validate_dataset(filepath: str, max_instruction_len: int = 2048, max_output_
     Returns:
         True if valid, False if errors found
     """
+    if max_instruction_len <= 0 or max_output_len <= 0:
+        print("ERROR: maximum lengths must be positive integers")
+        return False
+
     path = Path(filepath)
     
     if not path.exists():
@@ -94,6 +98,10 @@ def validate_dataset(filepath: str, max_instruction_len: int = 2048, max_output_
             if not isinstance(output, str):
                 errors.append(f"Line {line_num}: 'output' must be a string")
                 continue
+
+            if not isinstance(input_text, str):
+                errors.append(f"Line {line_num}: 'input' must be a string when provided")
+                continue
             
             # Check non-empty
             if not instruction.strip():
@@ -144,6 +152,9 @@ def validate_dataset(filepath: str, max_instruction_len: int = 2048, max_output_
             stats["min_output_len"] = min(stats["min_output_len"], len(output))
             stats["max_output_len"] = max(stats["max_output_len"], len(output))
     
+    if stats["valid_lines"] == 0:
+        errors.append("No valid training examples found")
+
     # Calculate averages
     if instruction_lens:
         stats["avg_instruction_len"] = sum(instruction_lens) / len(instruction_lens)
@@ -160,7 +171,8 @@ def validate_dataset(filepath: str, max_instruction_len: int = 2048, max_output_
     print(f"  With input field:      {stats['with_input']}")
     print(f"  Avg instruction len:   {stats['avg_instruction_len']:.0f} chars")
     print(f"  Avg output len:        {stats['avg_output_len']:.0f} chars")
-    print(f"  Min output len:        {stats['min_output_len']} chars")
+    min_output_len = stats["min_output_len"] if output_lens else 0
+    print(f"  Min output len:        {min_output_len} chars")
     print(f"  Max output len:        {stats['max_output_len']} chars")
     print(f"\nTask Type Distribution:")
     for task_type, count in stats["task_types"].items():
@@ -169,20 +181,20 @@ def validate_dataset(filepath: str, max_instruction_len: int = 2048, max_output_
     if warnings:
         print(f"\nWarnings ({len(warnings)}):")
         for w in warnings[:20]:
-            print(f"  ⚠ {w}")
+            print(f"  WARNING: {w}")
         if len(warnings) > 20:
             print(f"  ... and {len(warnings) - 20} more")
     
     if errors:
         print(f"\nErrors ({len(errors)}):")
         for e in errors[:20]:
-            print(f"  ✗ {e}")
+            print(f"  ERROR: {e}")
         if len(errors) > 20:
             print(f"  ... and {len(errors) - 20} more")
-        print(f"\nResult: FAILED ✗")
+        print("\nResult: FAILED")
         return False
     else:
-        print(f"\nResult: PASSED ✓")
+        print("\nResult: PASSED")
         return True
 
 

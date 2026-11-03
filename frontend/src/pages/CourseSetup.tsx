@@ -160,15 +160,20 @@ export function CourseForm() {
     };
 
     try {
+      let savedCourse: Course | undefined;
       if (isEditing && id) {
-        await updateMutation.mutateAsync({
+        savedCourse = await updateMutation.mutateAsync({
           id,
           data: payload as CourseUpdateInput,
         });
       } else {
-        await createMutation.mutateAsync(payload);
+        savedCourse = await createMutation.mutateAsync(payload);
       }
-      navigate('/courses');
+      if (syllabusText.trim() && savedCourse?.topic_count) {
+        navigate(`/coverage/${savedCourse.id}`);
+      } else {
+        navigate('/courses');
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to save course. Please check inputs.';
       setSubmitError(msg);
@@ -267,7 +272,7 @@ export function CourseForm() {
               <div>
                 <CardTitle className="text-base">Syllabus Outline</CardTitle>
                 <CardDescription>
-                  Paste your raw syllabus with Unit headers. The offline AI will parse topics and prerequisites.
+                    Paste your syllabus with unit headers. The local AI parses topics when loaded; you can review and edit the results before analyzing coverage.
                 </CardDescription>
               </div>
               <Badge variant="outline" className="text-xs font-normal text-gray-600">

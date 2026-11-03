@@ -109,6 +109,49 @@ def test_course_create_rejects_unparseable_syllabus(client: TestClient) -> None:
     assert client.get("/api/courses/").json()["total"] == 0
 
 
+def test_syllabus_parser_rejects_out_of_range_units_without_replacing_existing_topics(
+    client: TestClient,
+    test_course: Course,
+) -> None:
+    valid = client.post(
+        f"/api/courses/{test_course.id}/syllabus",
+        json={"syllabus_text": "Unit 1: Existing topic"},
+    )
+    assert valid.status_code == 200
+    existing_ids = {topic["id"] for topic in valid.json()}
+
+    invalid = client.post(
+        f"/api/courses/{test_course.id}/syllabus",
+        json={"syllabus_text": "Unit 11: Unsupported\n- Broken parser"},
+    )
+    assert invalid.status_code == 422
+    assert "outside the supported range" in invalid.json()["detail"]
+
+    topics = client.get(f"/api/syllabus/topics/{test_course.id}").json()
+    assert {topic["id"] for topic in topics} == existing_ids
+
+
+def test_topic_review_can_edit_name_and_subtopics(
+    client: TestClient,
+    test_course: Course,
+) -> None:
+    created = client.post(
+        f"/api/courses/{test_course.id}/syllabus",
+        json={"syllabus_text": "Unit IV: Graph algorithms"},
+    )
+    assert created.status_code == 200
+    topic = created.json()[0]
+    assert topic["unit_number"] == 4
+
+    updated = client.put(
+        f"/api/syllabus/topics/{topic['id']}",
+        json={"topic_name": "Graph traversal", "subtopics": ["BFS", "DFS"]},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["topic_name"] == "Graph traversal"
+    assert updated.json()["subtopics"] == ["BFS", "DFS"]
+
+
 def test_syllabus_file_extraction_accepts_text_and_pdf(client: TestClient) -> None:
     text_response = client.post(
         "/api/syllabus/extract",

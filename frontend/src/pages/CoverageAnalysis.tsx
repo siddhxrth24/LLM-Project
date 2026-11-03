@@ -17,6 +17,9 @@ import {
   Sparkles,
   ExternalLink,
   Layers,
+  Pencil,
+  Save,
+  X,
 } from 'lucide-react';
 
 import {
@@ -37,6 +40,8 @@ import { ErrorDisplay } from '@/components/shared/ErrorDisplay';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
@@ -63,6 +68,10 @@ export default function CoverageAnalysis() {
     5: true,
   });
   const [expandedTopics, setExpandedTopics] = React.useState<Record<number, boolean>>({});
+  const [editingTopicId, setEditingTopicId] = React.useState<number | null>(null);
+  const [topicNameDraft, setTopicNameDraft] = React.useState('');
+  const [subtopicsDraft, setSubtopicsDraft] = React.useState('');
+  const [topicEditError, setTopicEditError] = React.useState<string | null>(null);
 
   // Queries
   const { data: coursesData, isLoading: isLoadingCourses } = useCourses();
@@ -135,6 +144,36 @@ export default function CoverageAnalysis() {
       });
     } catch {
       // Error handled
+    }
+  };
+
+  const beginTopicEdit = (topic: SyllabusTopic) => {
+    setEditingTopicId(topic.id);
+    setTopicNameDraft(topic.topic_name);
+    setSubtopicsDraft((topic.subtopics || []).map(String).join('\n'));
+    setTopicEditError(null);
+    setExpandedTopics((current) => ({ ...current, [topic.id]: true }));
+  };
+
+  const saveTopicEdit = async (topic: SyllabusTopic) => {
+    const cleanedName = topicNameDraft.trim();
+    if (!cleanedName) {
+      setTopicEditError('Enter a topic name before saving.');
+      return;
+    }
+    try {
+      await updateTopicMutation.mutateAsync({
+        topicId: topic.id,
+        courseId: selectedCourseId,
+        data: {
+          topic_name: cleanedName,
+          subtopics: subtopicsDraft.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+        },
+      });
+      setEditingTopicId(null);
+      setTopicEditError(null);
+    } catch (error) {
+      setTopicEditError(error instanceof Error ? error.message : 'Could not save this topic.');
     }
   };
 
@@ -240,7 +279,7 @@ export default function CoverageAnalysis() {
     <div className="space-y-6 pb-12">
       <PageHeader
         title="Syllabus Coverage Analysis"
-        description="Verify whether every syllabus exam concept is thoroughly addressed in your slide decks or textbook notes."
+        description="Review and edit extracted topics, then check whether your notes and slides cover them."
         actions={
           <div className="flex items-center gap-3">
             <div className="w-56">
@@ -511,6 +550,16 @@ export default function CoverageAnalysis() {
                                       )}
                                       <span>{topic.topic_name}</span>
                                     </button>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-7 px-2 text-[11px]"
+                                      onClick={() => beginTopicEdit(topic)}
+                                      aria-label={`Edit ${topic.topic_name}`}
+                                    >
+                                      <Pencil className="mr-1 h-3 w-3" />
+                                      Edit
+                                    </Button>
 
                                     {topic.user_override_status && (
                                       <Badge variant="secondary" className="text-[10px] bg-purple-50 text-purple-700 border-purple-200">
@@ -596,6 +645,39 @@ export default function CoverageAnalysis() {
                               {/* Expanded Evidence View */}
                               {isTopicExpanded && (
                                 <div className="mt-4 pt-3 border-t border-gray-100 pl-4 space-y-3 animate-in fade-in-50 duration-150">
+                                  {editingTopicId === topic.id && (
+                                    <div className="max-w-2xl space-y-3 rounded-lg border border-primary-200 bg-primary-50/40 p-4">
+                                      <label className="block space-y-1 text-xs font-medium text-gray-700">
+                                        Topic name
+                                        <Input
+                                          value={topicNameDraft}
+                                          maxLength={255}
+                                          onChange={(event) => setTopicNameDraft(event.target.value)}
+                                          disabled={updateTopicMutation.isPending}
+                                        />
+                                      </label>
+                                      <label className="block space-y-1 text-xs font-medium text-gray-700">
+                                        Subtopics, one per line
+                                        <Textarea
+                                          rows={4}
+                                          value={subtopicsDraft}
+                                          onChange={(event) => setSubtopicsDraft(event.target.value)}
+                                          disabled={updateTopicMutation.isPending}
+                                        />
+                                      </label>
+                                      {topicEditError && <p role="alert" className="text-xs text-red-600">{topicEditError}</p>}
+                                      <div className="flex gap-2">
+                                        <Button size="sm" onClick={() => void saveTopicEdit(topic)} disabled={updateTopicMutation.isPending}>
+                                          <Save className="mr-1 h-3.5 w-3.5" />
+                                          {updateTopicMutation.isPending ? 'Saving…' : 'Save topic'}
+                                        </Button>
+                                        <Button variant="outline" size="sm" onClick={() => { setEditingTopicId(null); setTopicEditError(null); }} disabled={updateTopicMutation.isPending}>
+                                          <X className="mr-1 h-3.5 w-3.5" />
+                                          Cancel
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  )}
                                   <div className="flex items-center justify-between">
                                     <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
                                       Matching Text Evidence & References

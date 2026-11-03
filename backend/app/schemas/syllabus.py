@@ -27,7 +27,7 @@ class SyllabusTextExtractionResponse(BaseModel):
 class SyllabusTopicCreate(BaseModel):
     """Schema for manually creating a syllabus topic."""
 
-    unit_number: int = Field(..., ge=1, le=10, description="Unit index (1-5)")
+    unit_number: int = Field(..., ge=1, le=5, description="Unit index (1-5)")
     topic_name: str = Field(..., min_length=1, max_length=255, description="Topic title")
     subtopics: list[str] = Field(default_factory=list, description="Subtopic bullet points")
     order_index: int = Field(default=0, ge=0, description="Sequencing order")
