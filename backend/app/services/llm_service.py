@@ -285,6 +285,7 @@ class LLMService:
         prompt: str,
         pydantic_model: type[T],
         max_retries: int = 1,
+        compact_output: bool = True,
     ) -> T:
         """
         Enforce structured JSON output matching a Pydantic schema from the LLM.
@@ -298,7 +299,7 @@ class LLMService:
             f"Do not include any intro text, markdown explanation, or trailing comments.\n"
             f"JSON Schema:\n{schema_json}\n"
         )
-        if safe_token_limit is not None:
+        if safe_token_limit is not None and compact_output:
             instruction += (
                 "CPU output budget is limited. Return compact valid JSON with every schema key. "
                 "Keep each string field to one short sentence and lists to at most two short items. "
@@ -337,7 +338,7 @@ class LLMService:
                     current_prompt = (
                         f"{instruction}\n\n"
                         f"The previous response failed validation: {last_error}. "
-                        f"Return only the corrected compact JSON object."
+                        f"Return only the corrected valid JSON object matching the schema."
                     )
 
         raise ValueError(

@@ -26,9 +26,11 @@ import {
   useUpdateCourse,
   useDeleteCourse,
   useExtractSyllabusFile,
+  useParseSyllabusPreview,
   Course,
   CourseCreateInput,
   CourseUpdateInput,
+  SyllabusTopicPreview,
 } from '@/lib/queries';
 import { PageHeader } from '@/components/shared/PageHeader';
 import { EmptyState } from '@/components/shared/EmptyState';
@@ -41,6 +43,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import {
   Dialog,
@@ -65,6 +68,7 @@ export function CourseForm() {
   const createMutation = useCreateCourse();
   const updateMutation = useUpdateCourse();
   const extractSyllabusMutation = useExtractSyllabusFile();
+  const parseSyllabusMutation = useParseSyllabusPreview();
   const syllabusFileInput = React.useRef<HTMLInputElement | null>(null);
 
   // Form State
@@ -73,6 +77,7 @@ export function CourseForm() {
   const [syllabusFilename, setSyllabusFilename] = React.useState('');
   const [syllabusPageCount, setSyllabusPageCount] = React.useState(0);
   const [syllabusUploadError, setSyllabusUploadError] = React.useState<string | null>(null);
+  const [syllabusPreviewTopics, setSyllabusPreviewTopics] = React.useState<SyllabusTopicPreview[]>([]);
   const [examDate, setExamDate] = React.useState('');
   const [studyDaysPerWeek, setStudyDaysPerWeek] = React.useState<number>(5);
   const [dailyStudyHours, setDailyStudyHours] = React.useState<number>(2);
@@ -133,12 +138,29 @@ export function CourseForm() {
       setSyllabusText(result.text);
       setSyllabusFilename(result.filename);
       setSyllabusPageCount(result.page_count);
+      const parsedTopics = await parseSyllabusMutation.mutateAsync(result.text);
+      setSyllabusPreviewTopics(parsedTopics);
     } catch (error) {
+      setSyllabusPreviewTopics([]);
       setSyllabusUploadError(
         error instanceof Error ? error.message : 'Could not extract text from this syllabus file.'
       );
     } finally {
       if (syllabusFileInput.current) syllabusFileInput.current.value = '';
+    }
+  };
+
+  const handleParseSyllabus = async () => {
+    if (!syllabusText.trim()) return;
+    setSyllabusUploadError(null);
+    setSyllabusPreviewTopics([]);
+    try {
+      const parsedTopics = await parseSyllabusMutation.mutateAsync(syllabusText);
+      setSyllabusPreviewTopics(parsedTopics);
+    } catch (error) {
+      setSyllabusUploadError(
+        error instanceof Error ? error.message : 'Could not parse the syllabus with the local AI.'
+      );
     }
   };
 
@@ -185,7 +207,7 @@ export function CourseForm() {
   }
 
   const isSubmitting =
-    createMutation.isPending || updateMutation.isPending || extractSyllabusMutation.isPending;
+    createMutation.isPending || updateMutation.isPending || extractSyllabusMutation.isPending || parseSyllabusMutation.isPending;
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 pb-12">
@@ -272,7 +294,7 @@ export function CourseForm() {
               <div>
                 <CardTitle className="text-base">Syllabus Outline</CardTitle>
                 <CardDescription>
-                    Paste your syllabus with unit headers. The local AI parses topics when loaded; you can review and edit the results before analyzing coverage.
+                    Upload or paste a syllabus. The local AI organizes it by unit and shows the extracted topics for review.
                 </CardDescription>
               </div>
               <Badge variant="outline" className="text-xs font-normal text-gray-600">
@@ -301,6 +323,17 @@ export function CourseForm() {
                 <UploadCloud className="h-4 w-4" />
                 {extractSyllabusMutation.isPending ? 'Extracting text...' : 'Upload syllabus'}
               </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                onClick={() => void handleParseSyllabus()}
+                disabled={!syllabusText.trim() || isSubmitting}
+              >
+                <Sparkles className="h-4 w-4" />
+                {parseSyllabusMutation.isPending ? 'Parsing with AI...' : 'Parse with AI'}
+              </Button>
               <span className="text-xs text-gray-500">
                 PDF or UTF-8 TXT, up to 10 MB
               </span>
@@ -311,6 +344,16 @@ export function CourseForm() {
                 </span>
               )}
             </div>
+            {(extractSyllabusMutation.isPending || parseSyllabusMutation.isPending) && (
+              <div className="space-y-2" aria-live="polite">
+                <p className="text-xs font-medium text-primary-700">
+                  {extractSyllabusMutation.isPending
+                    ? 'Reading syllabus pages...'
+                    : 'The local AI is organizing topics and subtopics by unit...'}
+                </p>
+                <Progress indeterminate aria-label="Syllabus processing progress" />
+              </div>
+            )}
             {syllabusUploadError && (
               <p role="alert" className="text-xs text-red-600">{syllabusUploadError}</p>
             )}
@@ -322,6 +365,42 @@ export function CourseForm() {
               onChange={(e) => setSyllabusText(e.target.value)}
               className="font-mono text-xs leading-relaxed"
             />
+            {syllabusPreviewTopics.length > 0 && (
+              <div className="space-y-4 rounded-lg border bg-gray-50 p-4" aria-live="polite">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">AI-parsed syllabus preview</h3>
+                  <p className="text-xs text-gray-500">
+                    {syllabusPreviewTopics.length} topics found. Review the structured results before saving.
+                  </p>
+                </div>
+                {Array.from(new Set(syllabusPreviewTopics.map((topic) => topic.unit_number))).map((unitNumber) => (
+                  <section key={unitNumber} className="space-y-2">
+                    <h4 className="text-sm font-semibold text-primary-800">Unit {unitNumber}</h4>
+                    <div className="space-y-2">
+                      {syllabusPreviewTopics
+                        .filter((topic) => topic.unit_number === unitNumber)
+                        .map((topic, index) => (
+                          <article key={`${unitNumber}-${topic.topic_name}-${index}`} className="rounded-md border bg-white p-3">
+                            <div className="flex flex-wrap items-baseline justify-between gap-2">
+                              <h5 className="text-sm font-medium text-gray-900">{topic.topic_name}</h5>
+                              <span className="text-xs text-gray-500">
+                                {topic.estimated_hours} hrs · difficulty {topic.difficulty}/5
+                              </span>
+                            </div>
+                            {topic.subtopics.length > 0 && (
+                              <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-gray-600">
+                                {topic.subtopics.map((subtopic, subtopicIndex) => (
+                                  <li key={`${subtopicIndex}-${subtopic}`}>{subtopic}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </article>
+                        ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            )}
             <div className="flex items-center gap-2 text-xs text-gray-500">
               <Sparkles className="h-3.5 w-3.5 text-primary-600 shrink-0" />
               <span>

@@ -1,4 +1,5 @@
 import io
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,39 @@ from app.models.models import Chunk, Course, Document, SyllabusTopic, Unit
 from app.main import app
 from app.services.embedding_service import EmbeddingService
 from app.services.llm_service import LLMService
+
+
+@pytest.fixture(autouse=True)
+def use_fake_syllabus_llm(monkeypatch):
+    import app.services.syllabus_service as syllabus_service
+
+    class FakeSyllabusLLM:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.options: list[dict] = []
+
+        def is_loaded(self) -> bool:
+            return True
+
+        def load_model(self) -> bool:
+            return True
+
+        def generate_structured(self, prompt, pydantic_model, **options):
+            self.prompts.append(prompt)
+            self.options.append(options)
+            unit_match = re.search(r"UNIT NUMBER: (\d+)", prompt)
+            unit_number = int(unit_match.group(1)) if unit_match else 1
+            source = prompt.rsplit("UNIT SOURCE:\n", 1)[-1]
+            if not re.match(r"\s*(?:Unit|Module|Chapter|Part)\b", source, re.IGNORECASE):
+                source = f"Unit {unit_number}:\n{source}"
+            parsed = syllabus_service.parse_syllabus_heuristic(source)
+            return pydantic_model.model_validate(
+                {"topics": [topic.model_dump() for topic in parsed]}
+            )
+
+    fake_llm = FakeSyllabusLLM()
+    monkeypatch.setattr(syllabus_service, "get_llm_service", lambda: fake_llm)
+    return fake_llm
 
 
 def test_course_crud(client: TestClient) -> None:
@@ -193,6 +227,99 @@ def test_syllabus_file_extraction_rejects_unsupported_and_empty_files(
     )
     assert empty.status_code == 422
     assert "No text was found" in empty.json()["detail"]
+
+
+def test_syllabus_extraction_keeps_only_coded_unit_content(client: TestClient) -> None:
+    syllabus = (
+        "COURSE NAME: Reinforcement Learning\n"
+        "Course Learning Outcomes\nCO1: Explain Markov Decision Processes\n"
+        "Course Content\nTopic No.\nContent\nDescription\n"
+        "U1-T1\nIntroduction to Reinforcement Learning - Elements of Reinforcement Learning - "
+        "Limitations and Scope\nOverview of Reinforcement Learning, MDPs, Policies\n-\n"
+        "U2-T1\nDynamic Programming - Policy Evaluation - Value Iteration\n"
+        "Text & Reference Books\nReference textbook\nEXAMINATION PATTERN\n"
+    )
+
+    response = client.post(
+        "/api/syllabus/extract",
+        files={"file": ("syllabus.txt", io.BytesIO(syllabus.encode()), "text/plain")},
+    )
+
+    assert response.status_code == 200
+    extracted = response.json()["text"]
+    assert "Course Content" in extracted
+    assert "U1-T1" in extracted and "U2-T1" in extracted
+    assert "Introduction to Reinforcement Learning" in extracted
+    assert "Dynamic Programming" in extracted
+    assert "Course Learning Outcomes" not in extracted
+    assert "Reference textbook" not in extracted
+    assert "EXAMINATION PATTERN" not in extracted
+
+
+def test_coded_syllabus_parser_uses_topic_rows_only(
+    client: TestClient,
+    test_course: Course,
+    use_fake_syllabus_llm,
+) -> None:
+    syllabus = (
+        "Course Learning Outcomes\nCO1: Markov Decision Processes\n"
+        "Course Content\nTopic No.\nContent\nDescription\n"
+        "U1-T1\nIntroduction to Reinforcement Learning - Elements of Reinforcement Learning - "
+        "Limitations and Scope\nOverview of Reinforcement Learning, MDPs, Policies\n-\n"
+        "U2-T1\nDynamic Programming - Policy Evaluation - Value Iteration\n"
+        "Text & Reference Books\nReference textbook\n"
+    )
+    response = client.post(
+        f"/api/courses/{test_course.id}/syllabus",
+        json={"syllabus_text": syllabus},
+    )
+
+    assert response.status_code == 200
+    topics = response.json()
+    assert [topic["unit_number"] for topic in topics] == [1, 2]
+    assert [topic["topic_name"] for topic in topics] == [
+        "Introduction to Reinforcement Learning",
+        "Dynamic Programming",
+    ]
+    assert "Overview of Reinforcement Learning" not in str(topics)
+    assert "Reference textbook" not in str(topics)
+    assert len(use_fake_syllabus_llm.prompts) == 2
+    assert all(option["compact_output"] is False for option in use_fake_syllabus_llm.options)
+    assert all("Do not truncate the list" in prompt for prompt in use_fake_syllabus_llm.prompts)
+    assert all('"prerequisites":[]' in prompt for prompt in use_fake_syllabus_llm.prompts)
+
+
+def test_syllabus_parse_reports_when_local_llm_is_unavailable(
+    client: TestClient,
+    test_course: Course,
+    monkeypatch,
+) -> None:
+    import app.services.syllabus_service as syllabus_service
+
+    class UnavailableLLM:
+        def is_loaded(self) -> bool:
+            return False
+
+        def load_model(self) -> bool:
+            return False
+
+    initial = client.post(
+        f"/api/courses/{test_course.id}/syllabus",
+        json={"syllabus_text": "Unit 1: Existing syllabus topic"},
+    )
+    assert initial.status_code == 200
+    saved_ids = {topic["id"] for topic in initial.json()}
+
+    monkeypatch.setattr(syllabus_service, "get_llm_service", UnavailableLLM)
+    response = client.post(
+        f"/api/courses/{test_course.id}/syllabus",
+        json={"syllabus_text": "Unit 1: Replacement topic"},
+    )
+
+    assert response.status_code == 503
+    assert "local language model is unavailable" in response.json()["detail"]
+    current_topics = client.get(f"/api/syllabus/topics/{test_course.id}").json()
+    assert {topic["id"] for topic in current_topics} == saved_ids
 
 
 def test_course_delete_cleans_uploads_and_search_indexes(
@@ -428,16 +555,34 @@ def test_model_loaders_do_not_fall_back_to_remote_ids(monkeypatch, tmp_path) -> 
     assert embedding_service.load_model() is False
 
 
-def test_application_startup_does_not_load_models(monkeypatch) -> None:
-    """Starting the API must not load or download model weights."""
-    def fail_if_loaded(self) -> bool:
-        raise AssertionError("Application startup must not load models")
+def test_syllabus_parse_preview_returns_llm_structured_topics(client: TestClient) -> None:
+    response = client.post(
+        "/api/syllabus/parse-preview",
+        json={"syllabus_text": "Unit 1: Foundations\n- Markov Decision Processes\n- Policies"},
+    )
 
-    monkeypatch.setattr(LLMService, "load_model", fail_if_loaded)
-    monkeypatch.setattr(EmbeddingService, "load_model", fail_if_loaded)
+    assert response.status_code == 200
+    topics = response.json()
+    assert topics[0]["unit_number"] == 1
+    assert topics[0]["topic_name"] == "Foundations"
+    assert topics[0]["subtopics"] == []
+
+
+def test_application_startup_loads_and_checks_llm(monkeypatch) -> None:
+    generated_prompts: list[str] = []
+
+    monkeypatch.setattr(LLMService, "load_model", lambda self: True)
+    monkeypatch.setattr(LLMService, "is_loaded", lambda self: True)
+    monkeypatch.setattr(
+        LLMService,
+        "generate",
+        lambda self, prompt, max_tokens=None, temperature=None: generated_prompts.append(prompt) or "OK",
+    )
 
     with TestClient(app) as startup_client:
         response = startup_client.get("/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "healthy"}
+    assert app.state.llm_ready is True
+    assert generated_prompts == ["Reply with OK."]

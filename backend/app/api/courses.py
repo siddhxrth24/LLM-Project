@@ -17,7 +17,10 @@ from app.schemas.course import (
     UnitSummary,
 )
 from app.schemas.syllabus import SyllabusParseRequest, SyllabusTopicResponse
-from app.services.syllabus_service import parse_syllabus
+from app.services.syllabus_service import (
+    SyllabusLLMUnavailableError,
+    parse_syllabus,
+)
 from app.services.embedding_service import get_embedding_service
 from app.services.keyword_service import delete_course_chunks as delete_course_fts
 
@@ -93,6 +96,12 @@ async def create_course(payload: CourseCreate, db: Session = Depends(get_db)) ->
     if payload.syllabus_text and payload.syllabus_text.strip():
         try:
             parse_syllabus(payload.syllabus_text.strip(), course.id, db)
+        except SyllabusLLMUnavailableError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
         except ValueError as exc:
             db.rollback()
             raise HTTPException(
@@ -150,6 +159,12 @@ async def update_course(
         if cleaned_syllabus:
             try:
                 parse_syllabus(cleaned_syllabus, course.id, db)
+            except SyllabusLLMUnavailableError as exc:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=str(exc),
+                ) from exc
             except ValueError as exc:
                 db.rollback()
                 raise HTTPException(
@@ -239,6 +254,12 @@ async def upload_syllabus(
     try:
         topics = parse_syllabus(payload.syllabus_text, course_id, db)
         db.commit()
+    except SyllabusLLMUnavailableError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
     except ValueError as exc:
         db.rollback()
         raise HTTPException(

@@ -127,6 +127,15 @@ export interface SyllabusTextExtractionResponse {
   page_count: number;
 }
 
+export interface SyllabusTopicPreview {
+  unit_number: number;
+  topic_name: string;
+  subtopics: string[];
+  prerequisites: (string | number)[];
+  estimated_hours: number;
+  difficulty: number;
+}
+
 export interface CoverageData {
   course_id: number;
   total_topics: number;
@@ -431,6 +440,17 @@ export function useExtractSyllabusFile() {
     mutationFn: async (formData) => {
       const response = await api.post('/syllabus/extract', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      return response.data;
+    },
+  });
+}
+
+export function useParseSyllabusPreview() {
+  return useMutation<SyllabusTopicPreview[], Error, string>({
+    mutationFn: async (syllabusText) => {
+      const response = await api.post('/syllabus/parse-preview', {
+        syllabus_text: syllabusText,
       });
       return response.data;
     },

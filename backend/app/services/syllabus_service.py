@@ -2,7 +2,7 @@ import math
 import re
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.core.logging_config import logger
@@ -15,17 +15,25 @@ from app.services.llm_service import get_llm_service
 from app.services.retrieval_service import hybrid_search
 
 
+class SyllabusLLMUnavailableError(RuntimeError):
+    """Raised when syllabus parsing is requested but no local LLM is available."""
+
+
 class LLMParsedTopic(BaseModel):
-    unit_number: int = Field(default=1, ge=1, le=5)
+    model_config = ConfigDict(extra="forbid")
+
+    unit_number: int = Field(..., ge=1, le=5)
     topic_name: str = Field(..., min_length=1, max_length=255)
-    subtopics: list[str] = Field(default_factory=list, max_length=100)
-    prerequisites: list[str] = Field(default_factory=list)
-    estimated_hours: float = Field(default=2.0, gt=0.0, le=50.0)
-    difficulty: int = Field(default=3, ge=1, le=5)
+    subtopics: list[str] = Field(..., max_length=100)
+    prerequisites: list[str] = Field(..., max_length=100)
+    estimated_hours: float = Field(..., gt=0.0, le=50.0)
+    difficulty: int = Field(..., ge=1, le=5)
 
 
 class LLMSyllabusStructure(BaseModel):
-    topics: list[LLMParsedTopic] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+    topics: list[LLMParsedTopic] = Field(..., max_length=100)
 
 
 class LLMCoverageClassification(BaseModel):
@@ -38,11 +46,123 @@ class LLMCoverageClassification(BaseModel):
     key_matching_points: list[str] = Field(default_factory=list)
 
 
+_TABLE_TOPIC_MARKER = re.compile(r"(?im)^\s*U([1-5])\s*[-–—]\s*T\s*(\d+)\b")
+_UNIT_HEADING = re.compile(
+    r"(?im)^\s*(?:Unit|Module|Chapter|Part)\s+(?:No\.?\s*)?"
+    r"(1|2|3|4|5|I{1,3}|IV|V)\b[^\r\n]*$|^\s*U([1-5])\s*$"
+)
+
+
+def _unit_number(label: str) -> int:
+    if label.isdigit():
+        return int(label)
+    return {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5}[label.upper()]
+
+
+def _split_syllabus_units(syllabus_text: str) -> list[tuple[int | None, str]]:
+    """Split long syllabus source into bounded LLM requests, one unit at a time."""
+    headings = list(_UNIT_HEADING.finditer(syllabus_text))
+    if headings:
+        sections: list[tuple[int | None, str]] = []
+        for index, heading in enumerate(headings):
+            label = heading.group(1) or heading.group(2)
+            end = headings[index + 1].start() if index + 1 < len(headings) else len(syllabus_text)
+            sections.append((_unit_number(label), syllabus_text[heading.start():end].strip()))
+        return sections
+
+    markers = list(_TABLE_TOPIC_MARKER.finditer(syllabus_text))
+    if not markers:
+        return [(None, syllabus_text)]
+
+    starts: list[tuple[int, int]] = []
+    previous_unit: int | None = None
+    for marker in markers:
+        unit_number = int(marker.group(1))
+        if unit_number != previous_unit:
+            starts.append((unit_number, marker.start()))
+            previous_unit = unit_number
+    return [
+        (
+            unit_number,
+            syllabus_text[start:end].strip(),
+        )
+        for index, (unit_number, start) in enumerate(starts)
+        for end in [starts[index + 1][1] if index + 1 < len(starts) else len(syllabus_text)]
+    ]
+
+
+def extract_unit_related_text(syllabus_text: str) -> str:
+    """Keep the unit content source intact for the LLM parser, removing other sections."""
+    if not _TABLE_TOPIC_MARKER.search(syllabus_text):
+        return syllabus_text.strip()
+
+    text = syllabus_text
+    course_content = re.search(r"(?im)^\s*Course\s+Content\s*$", text)
+    if course_content:
+        text = text[course_content.start():]
+
+    section_end = re.search(
+        r"(?im)^\s*(?:Text\s*&\s*Reference\s+Books|Examination\s+Pattern)\b",
+        text,
+    )
+    if section_end:
+        text = text[:section_end.start()]
+
+    return text.strip()
+
+
+def _parse_coded_unit_topics(syllabus_text: str) -> list[LLMParsedTopic]:
+    """Read U1-T1 curriculum rows and ignore unrelated syllabus sections."""
+    matches = list(_TABLE_TOPIC_MARKER.finditer(syllabus_text))
+    topics: list[LLMParsedTopic] = []
+    for index, match in enumerate(matches):
+        unit_number = int(match.group(1))
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(syllabus_text)
+        row_text = syllabus_text[match.end():end]
+        row_text = re.sub(r"(?im)^\s*(?:Topic\s+No\.?|Content|Description|Topic\s+Reference|Material\s+Upload)\s*$", " ", row_text)
+        row_text = re.sub(r"(?m)^\s*[-–—]\s*$", " ", row_text)
+        row_text = re.sub(r"(?<=\w)-\s*\r?\n\s*(?=\w)", "-", row_text)
+        row_text = re.sub(r"\s+", " ", row_text).strip(" -–—:;,.\t")
+
+        # Curriculum content is conventionally dash-separated; the first item
+        # is the topic and following items are its syllabus subtopics. The
+        # comma-heavy final cell in these tables is the adjacent Description column.
+        content_items = [
+            item.strip(" -–—:;,.\t")
+            for item in re.split(r"\s+[-–—]\s+", row_text)
+            if item.strip(" -–—:;,.\t")
+        ]
+        if content_items and content_items[-1].count(",") >= 2:
+            content_items.pop()
+        if not content_items:
+            continue
+
+        topic_name = content_items[0]
+        if len(topic_name) > 255:
+            topic_name = topic_name[:255].rstrip()
+        subtopics = list(dict.fromkeys(item[:255] for item in content_items[1:] if item))
+        topics.append(
+            LLMParsedTopic(
+                unit_number=unit_number,
+                topic_name=topic_name,
+                subtopics=subtopics[:100],
+                prerequisites=[],
+                estimated_hours=2.0,
+                difficulty=3,
+            )
+        )
+    return topics
+
+
 def parse_syllabus_heuristic(syllabus_text: str) -> list[LLMParsedTopic]:
     """
     Regex-based heuristic fallback parser for syllabus text.
     Handles 'Unit 1', 'Module 1', roman numerals, and numbered/bulleted topics.
     """
+    coded_topics = _parse_coded_unit_topics(syllabus_text)
+    if coded_topics:
+        return coded_topics
+
     lines = [line.strip() for line in syllabus_text.splitlines() if line.strip()]
     topics: list[LLMParsedTopic] = []
 
@@ -76,6 +196,7 @@ def parse_syllabus_heuristic(syllabus_text: str) -> list[LLMParsedTopic]:
                         unit_number=current_unit,
                         topic_name=remainder,
                         subtopics=[],
+                        prerequisites=[],
                         estimated_hours=2.0,
                         difficulty=3,
                     )
@@ -97,6 +218,7 @@ def parse_syllabus_heuristic(syllabus_text: str) -> list[LLMParsedTopic]:
                         unit_number=current_unit,
                         topic_name=topic_title,
                         subtopics=subtopics,
+                        prerequisites=[],
                         estimated_hours=2.0,
                         difficulty=3,
                     )
@@ -113,6 +235,7 @@ def parse_syllabus_heuristic(syllabus_text: str) -> list[LLMParsedTopic]:
                     unit_number=current_unit,
                     topic_name=topic_title,
                     subtopics=subtopics,
+                    prerequisites=[],
                     estimated_hours=2.0,
                     difficulty=3,
                 )
@@ -121,38 +244,70 @@ def parse_syllabus_heuristic(syllabus_text: str) -> list[LLMParsedTopic]:
     return topics
 
 
-def parse_syllabus(
-    syllabus_text: str,
-    course_id: int,
-    db: Session,
-) -> list[SyllabusTopic]:
-    """
-    Parse unstructured syllabus text into structured SyllabusTopic database records.
-    Uses LLM structured generation when available, falling back to heuristic parsing.
-    """
+def parse_syllabus_topics(syllabus_text: str) -> list[LLMParsedTopic]:
+    """Parse syllabus text into validated topic data using the configured local LLM."""
     if not syllabus_text or not syllabus_text.strip():
         raise ValueError("Syllabus text cannot be empty.")
 
+    syllabus_text = extract_unit_related_text(syllabus_text)
+
     llm = get_llm_service()
-    parsed_topics: list[LLMParsedTopic] = []
-
-    if llm.is_loaded():
-        prompt = (
-            "You are an academic curriculum parser. Extract all topics and subtopics from the syllabus text below.\n"
-            "Group topics into unit numbers (1 to 5). Estimate study hours (1.0 to 6.0) and difficulty (1=easiest to 5=hardest).\n"
-            "Identify prerequisites by name if earlier topics are clearly required.\n\n"
-            f"Syllabus Text:\n{syllabus_text}\n"
+    if not llm.is_loaded() and not llm.load_model():
+        raise SyllabusLLMUnavailableError(
+            "The local language model is unavailable. Download the configured model and "
+            "load it from Settings before parsing a syllabus."
         )
-        try:
-            structured = llm.generate_structured(prompt, LLMSyllabusStructure, max_retries=1)
-            parsed_topics = structured.topics
-            logger.info(f"LLM successfully extracted {len(parsed_topics)} topics from syllabus.")
-        except Exception as exc:
-            logger.warning(f"LLM syllabus extraction failed ({exc}); falling back to heuristic parser.")
 
-    if not parsed_topics:
-        parsed_topics = parse_syllabus_heuristic(syllabus_text)
-        logger.info(f"Heuristic parser extracted {len(parsed_topics)} topics.")
+    parsed_topics: list[LLMParsedTopic] = []
+    unit_sections = _split_syllabus_units(syllabus_text)
+    for unit_number, unit_text in unit_sections:
+        prompt = (
+            "ROLE: You are a precise academic syllabus data parser. Do not teach, summarize, "
+            "or add facts. Extract source content only.\n\n"
+            "SCOPE: The supplied text contains one unit section. Read the Topic No. and Content "
+            "columns. Ignore Course Outcomes, course details, credits, Unit Teaching Hours, "
+            "Development Needs, Skill Focus, Cross Cutting Issues, Reference Link, the adjacent "
+            "Description column, textbooks, and exam sections. Do not treat learning outcomes "
+            "or descriptions as syllabus topics.\n\n"
+            "EXTRACTION RULES:\n"
+            "1. Return one topic object for each Ux-Ty curriculum row, in source order. Do not "
+            "merge separate rows or omit any row.\n"
+            "2. Put the main subject of the Content cell in topic_name. Put every remaining "
+            "dash-separated Content item in subtopics, preserving wording and source order. "
+            "Do not truncate the list.\n"
+            "3. Set unit_number to the unit number given below for every topic.\n"
+            "4. Include all six keys on every object: unit_number, topic_name, subtopics, "
+            "prerequisites, estimated_hours, difficulty. Use no additional keys.\n"
+            "5. prerequisites must contain only clearly stated prerequisite topic names; use "
+            "an empty list when the source does not state any. Do not infer prerequisites.\n"
+            "6. estimated_hours must be greater than 0 and at most 50. Use the unit hours "
+            "only if the source supplies them; otherwise estimate the topic workload.\n"
+            "7. difficulty must be an integer from 1 (easiest) to 5 (hardest), based on the "
+            "listed concepts.\n"
+            "8. Return an empty topics list only when this unit has no Topic No. rows.\n\n"
+            "OUTPUT FORMAT: Return only this JSON shape, with every key present:\n"
+            '{"topics":[{"unit_number":1,"topic_name":"Topic title","subtopics":'
+            '["Subtopic one","Subtopic two"],"prerequisites":[],"estimated_hours":2.0,'
+            '"difficulty":3}]}\n\n'
+            f"UNIT NUMBER: {unit_number if unit_number is not None else 'read from source'}\n"
+            f"UNIT SOURCE:\n{unit_text}\n"
+        )
+        structured = llm.generate_structured(
+            prompt,
+            LLMSyllabusStructure,
+            max_retries=2,
+            compact_output=False,
+        )
+        if unit_number is not None and any(
+            topic.unit_number != unit_number for topic in structured.topics
+        ):
+            raise ValueError(
+                f"The LLM assigned a topic to the wrong unit while parsing Unit {unit_number}. "
+                "Please try again or correct the unit heading."
+            )
+        parsed_topics.extend(structured.topics)
+
+    logger.info(f"LLM successfully extracted {len(parsed_topics)} topics from syllabus.")
 
     if not parsed_topics:
         raise ValueError(
@@ -192,6 +347,18 @@ def parse_syllabus(
             "The syllabus parser did not return any usable topic names. "
             "Review the syllabus and try again."
         )
+
+    return cleaned_topics
+
+
+def parse_syllabus(
+    syllabus_text: str,
+    course_id: int,
+    db: Session,
+) -> list[SyllabusTopic]:
+    """Parse syllabus text with the local LLM and replace the course's saved topics."""
+    cleaned_topics = parse_syllabus_topics(syllabus_text)
+    syllabus_text = extract_unit_related_text(syllabus_text)
 
     # Clean existing syllabus topics for course
     db.query(SyllabusTopic).filter(SyllabusTopic.course_id == course_id).delete()

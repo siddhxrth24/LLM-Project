@@ -24,6 +24,17 @@ class SyllabusTextExtractionResponse(BaseModel):
     page_count: int = 0
 
 
+class SyllabusTopicPreview(BaseModel):
+    """Structured LLM topic shown for review before the course is saved."""
+
+    unit_number: int = Field(..., ge=1, le=5)
+    topic_name: str = Field(..., min_length=1, max_length=255)
+    subtopics: list[str] = Field(default_factory=list)
+    prerequisites: list[Any] = Field(default_factory=list)
+    estimated_hours: float = Field(..., gt=0, le=50)
+    difficulty: int = Field(..., ge=1, le=5)
+
+
 class SyllabusTopicCreate(BaseModel):
     """Schema for manually creating a syllabus topic."""
 

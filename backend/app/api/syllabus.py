@@ -10,13 +10,18 @@ from app.models.models import Course, SyllabusTopic
 from app.schemas.syllabus import (
     CoverageAnalysisResponse,
     SyllabusTextExtractionResponse,
+    SyllabusParseRequest,
+    SyllabusTopicPreview,
     SyllabusTopicResponse,
     SyllabusTopicUpdate,
 )
 from app.services.extraction_service import extract_pdf
 from app.services.syllabus_service import (
+    SyllabusLLMUnavailableError,
     analyze_coverage,
+    extract_unit_related_text,
     get_coverage_summary,
+    parse_syllabus_topics,
 )
 
 router = APIRouter(prefix="/api/syllabus", tags=["syllabus"])
@@ -70,7 +75,7 @@ async def extract_syllabus_file(
             if temporary_path:
                 temporary_path.unlink(missing_ok=True)
 
-    extracted_text = extracted_text.strip()
+    extracted_text = extract_unit_related_text(extracted_text)
     if not extracted_text:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -82,6 +87,28 @@ async def extract_syllabus_file(
         text=extracted_text,
         page_count=page_count,
     )
+
+
+@router.post("/parse-preview", response_model=list[SyllabusTopicPreview])
+async def parse_syllabus_preview(
+    payload: SyllabusParseRequest,
+) -> list[SyllabusTopicPreview]:
+    """Parse syllabus text with the local LLM and return reviewable topic data."""
+    try:
+        return [
+            SyllabusTopicPreview.model_validate(topic.model_dump())
+            for topic in parse_syllabus_topics(payload.syllabus_text)
+        ]
+    except SyllabusLLMUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
 
 def _to_topic_response(topic: SyllabusTopic) -> SyllabusTopicResponse:

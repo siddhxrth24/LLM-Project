@@ -6,10 +6,11 @@ export interface ProgressProps extends React.HTMLAttributes<HTMLDivElement> {
   max?: number;
   indicatorClassName?: string;
   showLabel?: boolean;
+  indeterminate?: boolean;
 }
 
 export const Progress = React.forwardRef<HTMLDivElement, ProgressProps>(
-  ({ className, value = 0, max = 100, indicatorClassName, showLabel = false, ...props }, ref) => {
+  ({ className, value = 0, max = 100, indicatorClassName, showLabel = false, indeterminate = false, ...props }, ref) => {
     const percentage = Math.min(Math.max((value / max) * 100, 0), 100);
 
     return (
@@ -19,7 +20,8 @@ export const Progress = React.forwardRef<HTMLDivElement, ProgressProps>(
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={max}
-          aria-valuenow={value}
+          aria-valuenow={indeterminate ? undefined : value}
+          aria-valuetext={indeterminate ? 'In progress' : undefined}
           className={cn(
             'relative h-2.5 w-full overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800',
             className
@@ -29,9 +31,10 @@ export const Progress = React.forwardRef<HTMLDivElement, ProgressProps>(
           <div
             className={cn(
               'h-full bg-primary-600 transition-all duration-300 ease-in-out rounded-full',
+              indeterminate && 'progress-indeterminate',
               indicatorClassName
             )}
-            style={{ width: `${percentage}%` }}
+            style={indeterminate ? undefined : { width: `${percentage}%` }}
           />
         </div>
         {showLabel && (

@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -18,6 +19,7 @@ from app.api import (
 from app.core.config import settings
 from app.core.database import init_db
 from app.core.logging_config import logger
+from app.services.llm_service import get_llm_service
 
 
 @asynccontextmanager
@@ -31,6 +33,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.exception(f"Database initialization error: {exc}")
         raise
+
+    # Load the local model before accepting requests so parsing does not pay the
+    # model initialization cost on the first upload.
+    llm = get_llm_service()
+    try:
+        loaded = await asyncio.to_thread(llm.load_model)
+        if loaded and llm.is_loaded():
+            await asyncio.to_thread(llm.generate, "Reply with OK.", 1, 0.0)
+            app.state.llm_ready = True
+            logger.info("Local LLM loaded and passed startup inference check.")
+        else:
+            app.state.llm_ready = False
+            logger.error(
+                "Local LLM is not ready. Syllabus parsing will be unavailable until the "
+                "configured model files are installed and the backend is restarted."
+            )
+    except Exception as exc:
+        app.state.llm_ready = False
+        logger.exception(f"Local LLM startup check failed: {exc}")
 
     logger.info("Application startup complete.")
     yield
