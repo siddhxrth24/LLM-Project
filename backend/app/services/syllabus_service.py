@@ -30,6 +30,16 @@ class LLMParsedTopic(BaseModel):
     difficulty: int = Field(..., ge=1, le=5)
 
 
+class LLMTopicContent(BaseModel):
+    """Minimal strict output for a single syllabus topic row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    unit_number: int = Field(..., ge=1, le=5)
+    topic_name: str = Field(..., min_length=1, max_length=255)
+    subtopics: list[str] = Field(..., max_length=100)
+
+
 class LLMSyllabusStructure(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -46,7 +56,7 @@ class LLMCoverageClassification(BaseModel):
     key_matching_points: list[str] = Field(default_factory=list)
 
 
-_TABLE_TOPIC_MARKER = re.compile(r"(?im)^\s*U([1-5])\s*[-–—]\s*T\s*(\d+)\b")
+_TABLE_TOPIC_MARKER = re.compile(r"(?im)^\s*U([1-5])\s*[-–-]\s*T\s*(\d+)\b")
 _UNIT_HEADING = re.compile(
     r"(?im)^\s*(?:Unit|Module|Chapter|Part)\s+(?:No\.?\s*)?"
     r"(1|2|3|4|5|I{1,3}|IV|V)\b[^\r\n]*$|^\s*U([1-5])\s*$"
@@ -91,6 +101,31 @@ def _split_syllabus_units(syllabus_text: str) -> list[tuple[int | None, str]]:
     ]
 
 
+def _extract_topic_content_items(row_text: str) -> list[str]:
+    """Keep dash-separated Content items and drop the comma-heavy Description cell."""
+    lines = row_text.splitlines()
+    description_line = next(
+        (index for index, line in enumerate(lines) if index > 0 and line.count(",") >= 2),
+        None,
+    )
+    if description_line is not None:
+        row_text = "\n".join(lines[:description_line])
+    row_text = re.sub(
+        r"(?im)^\s*(?:Topic\s+No\.?|Content|Description|Topic\s+Reference|Material\s+Upload)\s*$",
+        " ",
+        row_text,
+    )
+    row_text = re.sub(r"(?m)^\s*[-–—]\s*$", " ", row_text)
+    row_text = re.sub(r"(?<=\w)-\s*\r?\n\s*(?=\w)", "-", row_text)
+    row_text = re.sub(r"\s+", " ", row_text).strip(" -–—:;,.\t")
+    items = [
+        item.strip(" -–—:;,.\t")
+        for item in re.split(r"\s+[-–—]\s+", row_text)
+        if item.strip(" -–—:;,.\t")
+    ]
+    return items
+
+
 def extract_unit_related_text(syllabus_text: str) -> str:
     """Keep the unit content source intact for the LLM parser, removing other sections."""
     if not _TABLE_TOPIC_MARKER.search(syllabus_text):
@@ -120,17 +155,17 @@ def _parse_coded_unit_topics(syllabus_text: str) -> list[LLMParsedTopic]:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(syllabus_text)
         row_text = syllabus_text[match.end():end]
         row_text = re.sub(r"(?im)^\s*(?:Topic\s+No\.?|Content|Description|Topic\s+Reference|Material\s+Upload)\s*$", " ", row_text)
-        row_text = re.sub(r"(?m)^\s*[-–—]\s*$", " ", row_text)
+        row_text = re.sub(r"(?m)^\s*[-–-]\s*$", " ", row_text)
         row_text = re.sub(r"(?<=\w)-\s*\r?\n\s*(?=\w)", "-", row_text)
-        row_text = re.sub(r"\s+", " ", row_text).strip(" -–—:;,.\t")
+        row_text = re.sub(r"\s+", " ", row_text).strip(" -–-:;,.\t")
 
         # Curriculum content is conventionally dash-separated; the first item
         # is the topic and following items are its syllabus subtopics. The
         # comma-heavy final cell in these tables is the adjacent Description column.
         content_items = [
-            item.strip(" -–—:;,.\t")
-            for item in re.split(r"\s+[-–—]\s+", row_text)
-            if item.strip(" -–—:;,.\t")
+            item.strip(" -–-:;,.\t")
+            for item in re.split(r"\s+[-–-]\s+", row_text)
+            if item.strip(" -–-:;,.\t")
         ]
         if content_items and content_items[-1].count(",") >= 2:
             content_items.pop()
@@ -172,7 +207,7 @@ def parse_syllabus_heuristic(syllabus_text: str) -> list[LLMParsedTopic]:
     for line in lines:
         # Detect unit header: "Unit 1:", "Module II -", etc.
         unit_match = re.match(
-            r"^(?:Unit|Module|Chapter|Part)\s+(?:No\.?\s*)?([0-9]+|[IVX]+)\s*[:.\-–—]?\s*(.*)$",
+            r"^(?:Unit|Module|Chapter|Part)\s+(?:No\.?\s*)?([0-9]+|[IVX]+)\s*[:.\-–-]?\s*(.*)$",
             line,
             re.IGNORECASE,
         )
@@ -259,53 +294,94 @@ def parse_syllabus_topics(syllabus_text: str) -> list[LLMParsedTopic]:
         )
 
     parsed_topics: list[LLMParsedTopic] = []
-    unit_sections = _split_syllabus_units(syllabus_text)
-    for unit_number, unit_text in unit_sections:
-        prompt = (
-            "ROLE: You are a precise academic syllabus data parser. Do not teach, summarize, "
-            "or add facts. Extract source content only.\n\n"
-            "SCOPE: The supplied text contains one unit section. Read the Topic No. and Content "
-            "columns. Ignore Course Outcomes, course details, credits, Unit Teaching Hours, "
-            "Development Needs, Skill Focus, Cross Cutting Issues, Reference Link, the adjacent "
-            "Description column, textbooks, and exam sections. Do not treat learning outcomes "
-            "or descriptions as syllabus topics.\n\n"
-            "EXTRACTION RULES:\n"
-            "1. Return one topic object for each Ux-Ty curriculum row, in source order. Do not "
-            "merge separate rows or omit any row.\n"
-            "2. Put the main subject of the Content cell in topic_name. Put every remaining "
-            "dash-separated Content item in subtopics, preserving wording and source order. "
-            "Do not truncate the list.\n"
-            "3. Set unit_number to the unit number given below for every topic.\n"
-            "4. Include all six keys on every object: unit_number, topic_name, subtopics, "
-            "prerequisites, estimated_hours, difficulty. Use no additional keys.\n"
-            "5. prerequisites must contain only clearly stated prerequisite topic names; use "
-            "an empty list when the source does not state any. Do not infer prerequisites.\n"
-            "6. estimated_hours must be greater than 0 and at most 50. Use the unit hours "
-            "only if the source supplies them; otherwise estimate the topic workload.\n"
-            "7. difficulty must be an integer from 1 (easiest) to 5 (hardest), based on the "
-            "listed concepts.\n"
-            "8. Return an empty topics list only when this unit has no Topic No. rows.\n\n"
-            "OUTPUT FORMAT: Return only this JSON shape, with every key present:\n"
-            '{"topics":[{"unit_number":1,"topic_name":"Topic title","subtopics":'
-            '["Subtopic one","Subtopic two"],"prerequisites":[],"estimated_hours":2.0,'
-            '"difficulty":3}]}\n\n'
-            f"UNIT NUMBER: {unit_number if unit_number is not None else 'read from source'}\n"
-            f"UNIT SOURCE:\n{unit_text}\n"
-        )
-        structured = llm.generate_structured(
-            prompt,
-            LLMSyllabusStructure,
-            max_retries=2,
-            compact_output=False,
-        )
-        if unit_number is not None and any(
-            topic.unit_number != unit_number for topic in structured.topics
-        ):
-            raise ValueError(
-                f"The LLM assigned a topic to the wrong unit while parsing Unit {unit_number}. "
-                "Please try again or correct the unit heading."
+    topic_markers = list(_TABLE_TOPIC_MARKER.finditer(syllabus_text))
+    if topic_markers:
+        for index, marker in enumerate(topic_markers):
+            unit_number = int(marker.group(1))
+            next_start = (
+                topic_markers[index + 1].start()
+                if index + 1 < len(topic_markers)
+                else len(syllabus_text)
             )
-        parsed_topics.extend(structured.topics)
+            content_items = _extract_topic_content_items(
+                syllabus_text[marker.end():next_start]
+            )
+            if not content_items:
+                continue
+
+            topic_title, *subtopics = content_items
+            row_source = (
+                f"Topic title: {topic_title}\n"
+                "Subtopic items:\n"
+                + "\n".join(f"- {item}" for item in subtopics)
+            )
+            prompt = (
+                "Convert this single syllabus topic into the required JSON shape. Copy the "
+                "topic title exactly into topic_name. Copy every subtopic item exactly and in "
+                "the same order into subtopics. Do not combine, summarize, or add items. "
+                "Use the given unit number. Return a JSON data object, never a JSON Schema. "
+                "Use exactly these keys and replace the example values with the supplied text: "
+                '{"unit_number":1,"topic_name":"Topic title","subtopics":["Subtopic one"]}. '
+                "Return only compact valid JSON.\n"
+                f"UNIT NUMBER: {unit_number}\n{row_source}"
+            )
+            logger.info(
+                f"Parsing syllabus topic {index + 1}/{len(topic_markers)} "
+                f"({marker.group(0).strip()}) with the local LLM."
+            )
+            topic = llm.generate_structured(
+                prompt,
+                LLMTopicContent,
+                max_retries=1,
+                compact_output=False,
+                max_output_tokens=512,
+                include_json_schema=False,
+            )
+            if topic.unit_number != unit_number:
+                raise ValueError(
+                    f"The LLM assigned {marker.group(0).strip()} to the wrong unit. "
+                    "Please try parsing again."
+                )
+            parsed_topics.append(
+                LLMParsedTopic(
+                    unit_number=topic.unit_number,
+                    topic_name=topic.topic_name,
+                    subtopics=topic.subtopics,
+                    prerequisites=[],
+                    estimated_hours=2.0,
+                    difficulty=3,
+                )
+            )
+    else:
+        unit_sections = _split_syllabus_units(syllabus_text)
+        for unit_number, unit_text in unit_sections:
+            prompt = (
+                "ROLE: You are a precise academic syllabus data parser. Do not teach, summarize, "
+                "or add facts. Extract source content only.\n\n"
+                "SCOPE: The supplied text contains one unit section. Extract listed topic names "
+                "and subtopics. Ignore course details, outcomes, credits, reference books, and "
+                "exam sections. Preserve every source item and its order.\n\n"
+                "Return every topic with all six fields: unit_number, topic_name, subtopics, "
+                "prerequisites, estimated_hours, difficulty. Do not infer prerequisites.\n"
+                "OUTPUT FORMAT: JSON only, matching the schema exactly.\n"
+                f"UNIT NUMBER: {unit_number if unit_number is not None else 'read from source'}\n"
+                f"UNIT SOURCE:\n{unit_text}\n"
+            )
+            structured = llm.generate_structured(
+                prompt,
+                LLMSyllabusStructure,
+                max_retries=1,
+                compact_output=False,
+                max_output_tokens=768,
+            )
+            if unit_number is not None and any(
+                topic.unit_number != unit_number for topic in structured.topics
+            ):
+                raise ValueError(
+                    f"The LLM assigned a topic to the wrong unit while parsing Unit {unit_number}. "
+                    "Please try again or correct the unit heading."
+                )
+            parsed_topics.extend(structured.topics)
 
     logger.info(f"LLM successfully extracted {len(parsed_topics)} topics from syllabus.")
 
@@ -319,7 +395,7 @@ def parse_syllabus_topics(syllabus_text: str) -> list[LLMParsedTopic]:
     cleaned_topics: list[LLMParsedTopic] = []
     seen: set[tuple[int, str]] = set()
     for topic in parsed_topics:
-        name = " ".join(topic.topic_name.split()).strip(" -–—:;,.\t")
+        name = " ".join(topic.topic_name.split()).strip(" -–-:;,.\t")
         if not name:
             continue
         if len(name) > 255:

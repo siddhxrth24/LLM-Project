@@ -286,6 +286,8 @@ class LLMService:
         pydantic_model: type[T],
         max_retries: int = 1,
         compact_output: bool = True,
+        max_output_tokens: Optional[int] = None,
+        include_json_schema: bool = True,
     ) -> T:
         """
         Enforce structured JSON output matching a Pydantic schema from the LLM.
@@ -293,11 +295,14 @@ class LLMService:
         schema = pydantic_model.model_json_schema()
         schema_json = json.dumps(schema, separators=(",", ":"))
         safe_token_limit, safe_timeout = self._cpu_safe_limits()
+        schema_instruction = (
+            f"JSON Schema:\n{schema_json}\n" if include_json_schema else ""
+        )
         instruction = (
             f"{prompt}\n\n"
-            f"IMPORTANT: Respond ONLY with a valid JSON object matching the JSON Schema below. "
+            f"IMPORTANT: Respond ONLY with a valid JSON object matching the required output shape. "
             f"Do not include any intro text, markdown explanation, or trailing comments.\n"
-            f"JSON Schema:\n{schema_json}\n"
+            f"{schema_instruction}"
         )
         if safe_token_limit is not None and compact_output:
             instruction += (
@@ -320,7 +325,7 @@ class LLMService:
             raw_output = self.generate(
                 current_prompt,
                 temperature=0.0 if safe_token_limit is not None else 0.1,
-                max_tokens=safe_token_limit,
+                max_tokens=safe_token_limit or max_output_tokens,
                 deadline=deadline,
             )
 

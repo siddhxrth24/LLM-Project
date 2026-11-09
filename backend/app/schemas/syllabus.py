@@ -35,6 +35,11 @@ class SyllabusTopicPreview(BaseModel):
     difficulty: int = Field(..., ge=1, le=5)
 
 
+class SyllabusLLMCheckResponse(BaseModel):
+    question: str
+    answer: str
+
+
 class SyllabusTopicCreate(BaseModel):
     """Schema for manually creating a syllabus topic."""
 

@@ -1,4 +1,4 @@
-# SemesTrack — Implementation Plan
+# SemesTrack - Implementation Plan
 
 ## Environment Assessment
 - **Python:** 3.13.3 (will use uv to create a 3.12 venv for ML compatibility)
@@ -10,8 +10,8 @@
 ## Design Decisions
 
 ### Model Selection
-- **LLM:** `Qwen/Qwen3.5-0.8B` — small enough for CPU inference, chat-template support via transformers
-- **Embeddings:** `sentence-transformers/all-MiniLM-L6-v2` — 80MB, fast on CPU, 384-dim embeddings
+- **LLM:** `Qwen/Qwen3.5-0.8B` - small enough for CPU inference, chat-template support via transformers
+- **Embeddings:** `sentence-transformers/all-MiniLM-L6-v2` - 80MB, fast on CPU, 384-dim embeddings
 - **Fallback:** If Qwen3.5-0.8B has compatibility issues, fall back to `Qwen/Qwen2.5-0.5B` or `TinyLlama/TinyLlama-1.1B-Chat-v1.0`
 
 ### Python Version

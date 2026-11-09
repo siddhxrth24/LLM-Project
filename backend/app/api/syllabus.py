@@ -4,11 +4,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.core.database import get_db
 from app.models.models import Course, SyllabusTopic
 from app.schemas.syllabus import (
     CoverageAnalysisResponse,
+    SyllabusLLMCheckResponse,
     SyllabusTextExtractionResponse,
     SyllabusParseRequest,
     SyllabusTopicPreview,
@@ -16,6 +18,7 @@ from app.schemas.syllabus import (
     SyllabusTopicUpdate,
 )
 from app.services.extraction_service import extract_pdf
+from app.services.llm_service import get_llm_service
 from app.services.syllabus_service import (
     SyllabusLLMUnavailableError,
     analyze_coverage,
@@ -26,6 +29,7 @@ from app.services.syllabus_service import (
 
 router = APIRouter(prefix="/api/syllabus", tags=["syllabus"])
 MAX_SYLLABUS_FILE_BYTES = 10 * 1024 * 1024
+SYLLABUS_LLM_CHECK_QUESTION = "What is 2 + 2? Reply with only the number."
 
 
 @router.post("/extract", response_model=SyllabusTextExtractionResponse)
@@ -89,15 +93,45 @@ async def extract_syllabus_file(
     )
 
 
+@router.post("/llm-check", response_model=SyllabusLLMCheckResponse)
+async def check_syllabus_llm() -> SyllabusLLMCheckResponse:
+    """Verify plain-text local LLM generation before starting syllabus parsing."""
+    try:
+        answer = await run_in_threadpool(
+            get_llm_service().generate,
+            SYLLABUS_LLM_CHECK_QUESTION,
+            12,
+            0.0,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"The local language model failed its question check: {exc}",
+        ) from exc
+    if not answer.strip():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The local language model returned an empty answer to its question check.",
+        )
+    return SyllabusLLMCheckResponse(
+        question=SYLLABUS_LLM_CHECK_QUESTION,
+        answer=answer.strip(),
+    )
+
+
 @router.post("/parse-preview", response_model=list[SyllabusTopicPreview])
 async def parse_syllabus_preview(
     payload: SyllabusParseRequest,
 ) -> list[SyllabusTopicPreview]:
     """Parse syllabus text with the local LLM and return reviewable topic data."""
     try:
+        parsed_topics = await run_in_threadpool(
+            parse_syllabus_topics,
+            payload.syllabus_text,
+        )
         return [
             SyllabusTopicPreview.model_validate(topic.model_dump())
-            for topic in parse_syllabus_topics(payload.syllabus_text)
+            for topic in parsed_topics
         ]
     except SyllabusLLMUnavailableError as exc:
         raise HTTPException(

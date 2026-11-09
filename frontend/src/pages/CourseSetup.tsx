@@ -27,10 +27,12 @@ import {
   useDeleteCourse,
   useExtractSyllabusFile,
   useParseSyllabusPreview,
+  useCheckSyllabusLLM,
   Course,
   CourseCreateInput,
   CourseUpdateInput,
   SyllabusTopicPreview,
+  SyllabusLLMCheckResponse,
 } from '@/lib/queries';
 import { PageHeader } from '@/components/shared/PageHeader';
 import { EmptyState } from '@/components/shared/EmptyState';
@@ -43,7 +45,6 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
-import { Progress } from '@/components/ui/progress';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import {
   Dialog,
@@ -69,6 +70,7 @@ export function CourseForm() {
   const updateMutation = useUpdateCourse();
   const extractSyllabusMutation = useExtractSyllabusFile();
   const parseSyllabusMutation = useParseSyllabusPreview();
+  const checkSyllabusLLMMutation = useCheckSyllabusLLM();
   const syllabusFileInput = React.useRef<HTMLInputElement | null>(null);
 
   // Form State
@@ -78,6 +80,10 @@ export function CourseForm() {
   const [syllabusPageCount, setSyllabusPageCount] = React.useState(0);
   const [syllabusUploadError, setSyllabusUploadError] = React.useState<string | null>(null);
   const [syllabusPreviewTopics, setSyllabusPreviewTopics] = React.useState<SyllabusTopicPreview[]>([]);
+  const [llmCheckResult, setLlmCheckResult] = React.useState<SyllabusLLMCheckResponse | null>(null);
+  const [syllabusProcessing, setSyllabusProcessing] = React.useState(false);
+  const [syllabusProcessingStage, setSyllabusProcessingStage] = React.useState<'extracting' | 'checking' | 'parsing'>('extracting');
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
   const [examDate, setExamDate] = React.useState('');
   const [studyDaysPerWeek, setStudyDaysPerWeek] = React.useState<number>(5);
   const [dailyStudyHours, setDailyStudyHours] = React.useState<number>(2);
@@ -86,6 +92,18 @@ export function CourseForm() {
   // Validation & Error State
   const [formErrors, setFormErrors] = React.useState<Record<string, string>>({});
   const [submitError, setSubmitError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (!syllabusProcessing) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [syllabusProcessing]);
+
+  const formatElapsed = (seconds: number) =>
+    `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
 
   // Populate data when editing
   React.useEffect(() => {
@@ -130,6 +148,11 @@ export function CourseForm() {
   const handleSyllabusFile = async (file?: File) => {
     if (!file) return;
     setSyllabusUploadError(null);
+    setLlmCheckResult(null);
+    setSyllabusPreviewTopics([]);
+    setElapsedSeconds(0);
+    setSyllabusProcessingStage('extracting');
+    setSyllabusProcessing(true);
     const formData = new FormData();
     formData.append('file', file);
 
@@ -138,6 +161,10 @@ export function CourseForm() {
       setSyllabusText(result.text);
       setSyllabusFilename(result.filename);
       setSyllabusPageCount(result.page_count);
+      setSyllabusProcessingStage('checking');
+      const check = await checkSyllabusLLMMutation.mutateAsync();
+      setLlmCheckResult(check);
+      setSyllabusProcessingStage('parsing');
       const parsedTopics = await parseSyllabusMutation.mutateAsync(result.text);
       setSyllabusPreviewTopics(parsedTopics);
     } catch (error) {
@@ -146,6 +173,7 @@ export function CourseForm() {
         error instanceof Error ? error.message : 'Could not extract text from this syllabus file.'
       );
     } finally {
+      setSyllabusProcessing(false);
       if (syllabusFileInput.current) syllabusFileInput.current.value = '';
     }
   };
@@ -154,13 +182,22 @@ export function CourseForm() {
     if (!syllabusText.trim()) return;
     setSyllabusUploadError(null);
     setSyllabusPreviewTopics([]);
+    setLlmCheckResult(null);
+    setElapsedSeconds(0);
+    setSyllabusProcessingStage('checking');
+    setSyllabusProcessing(true);
     try {
+      const check = await checkSyllabusLLMMutation.mutateAsync();
+      setLlmCheckResult(check);
+      setSyllabusProcessingStage('parsing');
       const parsedTopics = await parseSyllabusMutation.mutateAsync(syllabusText);
       setSyllabusPreviewTopics(parsedTopics);
     } catch (error) {
       setSyllabusUploadError(
         error instanceof Error ? error.message : 'Could not parse the syllabus with the local AI.'
       );
+    } finally {
+      setSyllabusProcessing(false);
     }
   };
 
@@ -207,7 +244,7 @@ export function CourseForm() {
   }
 
   const isSubmitting =
-    createMutation.isPending || updateMutation.isPending || extractSyllabusMutation.isPending || parseSyllabusMutation.isPending;
+    createMutation.isPending || updateMutation.isPending || syllabusProcessing;
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 pb-12">
@@ -344,14 +381,18 @@ export function CourseForm() {
                 </span>
               )}
             </div>
-            {(extractSyllabusMutation.isPending || parseSyllabusMutation.isPending) && (
-              <div className="space-y-2" aria-live="polite">
-                <p className="text-xs font-medium text-primary-700">
-                  {extractSyllabusMutation.isPending
+            {syllabusProcessing && (
+              <div className="flex items-center justify-between gap-3 rounded-md border border-primary-100 bg-primary-50 px-3 py-2" aria-live="polite">
+                <p className="text-xs font-medium text-primary-800">
+                  {syllabusProcessingStage === 'extracting'
                     ? 'Reading syllabus pages...'
-                    : 'The local AI is organizing topics and subtopics by unit...'}
+                    : syllabusProcessingStage === 'checking'
+                      ? 'Checking that the local AI can answer...'
+                      : 'The local AI is organizing syllabus topics...'}
                 </p>
-                <Progress indeterminate aria-label="Syllabus processing progress" />
+                <p className="shrink-0 text-xs font-semibold tabular-nums text-primary-900">
+                  Elapsed {formatElapsed(elapsedSeconds)}
+                </p>
               </div>
             )}
             {syllabusUploadError && (
@@ -362,9 +403,20 @@ export function CourseForm() {
               rows={9}
               placeholder={`Unit 1: Introduction to Operating Systems\n- OS Structures and System Calls\n- Process Concept and Scheduling\n\nUnit 2: Memory Management\n- Paging and Segmentation\n- Virtual Memory and Page Replacement Algorithms`}
               value={syllabusText}
-              onChange={(e) => setSyllabusText(e.target.value)}
+              onChange={(e) => {
+                setSyllabusText(e.target.value);
+                setSyllabusPreviewTopics([]);
+                setLlmCheckResult(null);
+              }}
               className="font-mono text-xs leading-relaxed"
             />
+            {llmCheckResult && (
+              <div className="space-y-1 rounded-md border border-emerald-200 bg-emerald-50 p-3" aria-live="polite">
+                <p className="text-xs font-semibold text-emerald-900">Local AI check passed</p>
+                <p className="text-xs text-emerald-900">Q: {llmCheckResult.question}</p>
+                <p className="text-xs text-emerald-900">A: {llmCheckResult.answer}</p>
+              </div>
+            )}
             {syllabusPreviewTopics.length > 0 && (
               <div className="space-y-4 rounded-lg border bg-gray-50 p-4" aria-live="polite">
                 <div>

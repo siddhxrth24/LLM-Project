@@ -30,12 +30,27 @@ def use_fake_syllabus_llm(monkeypatch):
         def generate_structured(self, prompt, pydantic_model, **options):
             self.prompts.append(prompt)
             self.options.append(options)
+            if pydantic_model.__name__ == "LLMTopicContent":
+                unit_match = re.search(r"UNIT NUMBER: (\d+)", prompt)
+                topic_match = re.search(r"(?m)^Topic title: (.+)$", prompt)
+                subtopics = re.findall(r"(?m)^- (.+)$", prompt)
+                return pydantic_model.model_validate(
+                    {
+                        "unit_number": int(unit_match.group(1)),
+                        "topic_name": topic_match.group(1),
+                        "subtopics": subtopics,
+                    }
+                )
             unit_match = re.search(r"UNIT NUMBER: (\d+)", prompt)
             unit_number = int(unit_match.group(1)) if unit_match else 1
-            source = prompt.rsplit("UNIT SOURCE:\n", 1)[-1]
+            source_match = re.search(r"TOPIC ROW SOURCE:\n([^\n]+)", prompt)
+            source = source_match.group(1) if source_match else prompt.rsplit("UNIT SOURCE:\n", 1)[-1]
             if not re.match(r"\s*(?:Unit|Module|Chapter|Part)\b", source, re.IGNORECASE):
-                source = f"Unit {unit_number}:\n{source}"
+                if not re.match(r"\s*U[1-5]\s*[-–—]\s*T\d+", source, re.IGNORECASE):
+                    source = f"Unit {unit_number}:\n{source}"
             parsed = syllabus_service.parse_syllabus_heuristic(source)
+            if pydantic_model.__name__ == "LLMParsedTopic":
+                return pydantic_model.model_validate(parsed[0].model_dump())
             return pydantic_model.model_validate(
                 {"topics": [topic.model_dump() for topic in parsed]}
             )
@@ -285,8 +300,11 @@ def test_coded_syllabus_parser_uses_topic_rows_only(
     assert "Reference textbook" not in str(topics)
     assert len(use_fake_syllabus_llm.prompts) == 2
     assert all(option["compact_output"] is False for option in use_fake_syllabus_llm.options)
-    assert all("Do not truncate the list" in prompt for prompt in use_fake_syllabus_llm.prompts)
-    assert all('"prerequisites":[]' in prompt for prompt in use_fake_syllabus_llm.prompts)
+    assert all(option["max_retries"] == 1 for option in use_fake_syllabus_llm.options)
+    assert all(option["max_output_tokens"] == 512 for option in use_fake_syllabus_llm.options)
+    assert all(option["include_json_schema"] is False for option in use_fake_syllabus_llm.options)
+    assert all("Subtopic items" in prompt for prompt in use_fake_syllabus_llm.prompts)
+    assert all("Overview of Reinforcement Learning" not in prompt for prompt in use_fake_syllabus_llm.prompts)
 
 
 def test_syllabus_parse_reports_when_local_llm_is_unavailable(
@@ -566,6 +584,24 @@ def test_syllabus_parse_preview_returns_llm_structured_topics(client: TestClient
     assert topics[0]["unit_number"] == 1
     assert topics[0]["topic_name"] == "Foundations"
     assert topics[0]["subtopics"] == []
+
+
+def test_syllabus_llm_check_returns_question_and_answer(client: TestClient, monkeypatch) -> None:
+    import app.api.syllabus as syllabus_api
+
+    class WorkingLLM:
+        def generate(self, prompt, max_tokens=None, temperature=None):
+            assert prompt == "What is 2 + 2? Reply with only the number."
+            return "4"
+
+    monkeypatch.setattr(syllabus_api, "get_llm_service", lambda: WorkingLLM())
+    response = client.post("/api/syllabus/llm-check")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "question": "What is 2 + 2? Reply with only the number.",
+        "answer": "4",
+    }
 
 
 def test_application_startup_loads_and_checks_llm(monkeypatch) -> None:

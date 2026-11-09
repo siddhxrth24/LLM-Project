@@ -136,6 +136,11 @@ export interface SyllabusTopicPreview {
   difficulty: number;
 }
 
+export interface SyllabusLLMCheckResponse {
+  question: string;
+  answer: string;
+}
+
 export interface CoverageData {
   course_id: number;
   total_topics: number;
@@ -452,6 +457,15 @@ export function useParseSyllabusPreview() {
       const response = await api.post('/syllabus/parse-preview', {
         syllabus_text: syllabusText,
       });
+      return response.data;
+    },
+  });
+}
+
+export function useCheckSyllabusLLM() {
+  return useMutation<SyllabusLLMCheckResponse, Error, void>({
+    mutationFn: async () => {
+      const response = await api.post('/syllabus/llm-check');
       return response.data;
     },
   });

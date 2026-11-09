@@ -19,7 +19,7 @@ export default function DashboardPage() {
     <div className="space-y-6">
       <PageHeader
         title="Dashboard"
-        description="Welcome to SemesTrack — your completely offline AI academic study companion."
+        description="Welcome to SemesTrack - your completely offline AI academic study companion."
         actions={
           <Link to="/courses">
             <Button>

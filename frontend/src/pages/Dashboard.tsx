@@ -233,7 +233,7 @@ export default function Dashboard() {
                 Material Coverage
               </p>
               <p className="text-2xl font-bold text-gray-900">
-                {averageCoverage === null ? '—' : `${averageCoverage}%`}
+                {averageCoverage === null ? '-' : `${averageCoverage}%`}
               </p>
               <div className="w-24 mt-1.5">
                 <Progress value={averageCoverage ?? 0} className="h-1.5" />
