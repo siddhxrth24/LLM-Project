@@ -34,7 +34,12 @@ class EmbeddingService:
             chroma_dir.mkdir(parents=True, exist_ok=True)
             self._chroma_client = chromadb.PersistentClient(
                 path=str(chroma_dir),
-                settings=chromadb.config.Settings(anonymized_telemetry=False),
+                settings=chromadb.config.Settings(
+                    anonymized_telemetry=False,
+                    chroma_product_telemetry_impl=(
+                        "app.services.chroma_telemetry.NoopProductTelemetry"
+                    ),
+                ),
             )
             self._collection = self._chroma_client.get_or_create_collection(
                 name=self.collection_name,

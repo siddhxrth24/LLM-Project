@@ -584,11 +584,11 @@ export function useRecalculateSchedule() {
 // --- Topic Content / Teaching ---
 
 export function useTopicContent(topicId: number | string | undefined) {
-  return useQuery<TopicContent>({
+  return useQuery<TopicContent | null>({
     queryKey: ['topic', 'content', topicId],
     queryFn: async () => {
       const response = await api.get(`/topics/${topicId}/content`);
-      return response.data;
+      return response.status === 204 ? null : response.data;
     },
     enabled: Boolean(topicId),
   });
@@ -601,8 +601,10 @@ export function useGenerateTopicContent() {
       const response = await api.post(`/topics/generate/${topicId}`, { regenerate });
       return response.data;
     },
-    onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['topic', 'content', variables.topicId] });
+    onSuccess: async (data, variables) => {
+      const queryKey = ['topic', 'content', variables.topicId];
+      await queryClient.cancelQueries({ queryKey, exact: true });
+      queryClient.setQueryData(queryKey, data);
     },
   });
 }

@@ -121,6 +121,6 @@ class CoverageAnalysisResponse(BaseModel):
     not_found_count: int
     needs_review_count: int
     coverage_percentage: float = Field(
-        ..., description="Percentage of topics covered or partially covered"
+        ..., description="Average proportion of syllabus items matched in unit materials"
     )
     topics: list[SyllabusTopicResponse] = Field(default_factory=list)

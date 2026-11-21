@@ -206,7 +206,7 @@ async def run_coverage_analysis(
             detail=f"Course {course_id} not found",
         )
 
-    return analyze_coverage(course_id, db)
+    return await run_in_threadpool(analyze_coverage, course_id, db)
 
 
 @router.put("/topics/{topic_id}", response_model=SyllabusTopicResponse)

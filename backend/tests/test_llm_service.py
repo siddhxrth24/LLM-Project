@@ -1,9 +1,11 @@
 from contextlib import nullcontext
+import json
 import sys
 import time
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
 from app.services.llm_service import GenerationTimeoutError, LLMService
 
@@ -163,3 +165,39 @@ def test_generation_deadline_stops_inside_decode_loop(monkeypatch) -> None:
         service.generate("prompt", max_tokens=192, deadline=time.monotonic() + 0.005)
 
     assert service.model.calls == 1
+
+
+@pytest.mark.parametrize("wrapper_key", ["lesson_content", "content", "data", "result"])
+def test_structured_generation_unwraps_common_response_envelopes(wrapper_key) -> None:
+    class LessonShape(BaseModel):
+        definition: str
+        explanation: str
+        analogy: str
+        worked_example: str
+
+    service = LLMService()
+    calls = []
+    payload = {
+        "definition": "A process has states and actions.",
+        "explanation": "The agent selects an action in a state.",
+        "analogy": "Not stated in uploaded materials.",
+        "worked_example": "Not stated in uploaded materials.",
+    }
+
+    def generate(_prompt, **_kwargs):
+        calls.append(True)
+        return json.dumps({wrapper_key: payload})
+
+    service.generate = generate
+
+    lesson = service.generate_structured(
+        "Return a structured lesson",
+        LessonShape,
+        max_retries=1,
+    )
+
+    assert lesson.definition == payload["definition"]
+    assert lesson.explanation == payload["explanation"]
+    assert len(calls) == 1
+
+

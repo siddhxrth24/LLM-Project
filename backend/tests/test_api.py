@@ -201,6 +201,25 @@ def test_topic_review_can_edit_name_and_subtopics(
     assert updated.json()["subtopics"] == ["BFS", "DFS"]
 
 
+def test_topic_content_not_generated_returns_no_content(
+    client: TestClient,
+    test_course: Course,
+) -> None:
+    syllabus_response = client.post(
+        f"/api/courses/{test_course.id}/syllabus",
+        json={"syllabus_text": "Unit 1: Reinforcement Learning"},
+    )
+    assert syllabus_response.status_code == 200
+    topic_id = syllabus_response.json()[0]["id"]
+
+    content_response = client.get(f"/api/topics/{topic_id}/content")
+    missing_topic_response = client.get("/api/topics/999999/content")
+
+    assert content_response.status_code == 204
+    assert content_response.content == b""
+    assert missing_topic_response.status_code == 404
+
+
 def test_syllabus_file_extraction_accepts_text_and_pdf(client: TestClient) -> None:
     text_response = client.post(
         "/api/syllabus/extract",

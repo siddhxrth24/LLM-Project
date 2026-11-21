@@ -1,18 +1,18 @@
 import math
 import re
+import unicodedata
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.core.logging_config import logger
-from app.models.models import Course, SyllabusTopic
+from app.models.models import Chunk, Course, Document, SyllabusTopic, Unit
 from app.schemas.syllabus import (
     CoverageAnalysisResponse,
     SyllabusTopicResponse,
 )
 from app.services.llm_service import get_llm_service
-from app.services.retrieval_service import hybrid_search
 
 
 class SyllabusLLMUnavailableError(RuntimeError):
@@ -46,16 +46,6 @@ class LLMSyllabusStructure(BaseModel):
     topics: list[LLMParsedTopic] = Field(..., max_length=100)
 
 
-class LLMCoverageClassification(BaseModel):
-    status: str = Field(
-        ...,
-        description="'covered', 'partially_covered', 'not_found', or 'needs_review'",
-    )
-    confidence: float = Field(..., ge=0.0, le=1.0)
-    evidence_summary: str = Field(default="")
-    key_matching_points: list[str] = Field(default_factory=list)
-
-
 _TABLE_TOPIC_MARKER = re.compile(r"(?im)^\s*U([1-5])\s*[-–-]\s*T\s*(\d+)\b")
 _UNIT_HEADING = re.compile(
     r"(?im)^\s*(?:Unit|Module|Chapter|Part)\s+(?:No\.?\s*)?"
@@ -67,6 +57,29 @@ def _unit_number(label: str) -> int:
     if label.isdigit():
         return int(label)
     return {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5}[label.upper()]
+
+
+def _normalize_coverage_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    without_marks = "".join(char for char in normalized if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", without_marks).strip()
+
+
+def _coverage_terms(topic: SyllabusTopic) -> list[str]:
+    values = [topic.topic_name, *(topic.subtopics or [])]
+    terms: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        # The extracted syllabus table sometimes carries the next row's header
+        # text into the current subtopic cell. Exclude that unrelated suffix.
+        clean_value = re.split(r"\bUnit\s+No\.?", value, maxsplit=1, flags=re.IGNORECASE)[0]
+        normalized = _normalize_coverage_text(clean_value)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            terms.append(clean_value.strip())
+    return terms
 
 
 def _split_syllabus_units(syllabus_text: str) -> list[tuple[int | None, str]]:
@@ -468,7 +481,8 @@ def parse_syllabus(
 def analyze_coverage(course_id: int, db: Session) -> CoverageAnalysisResponse:
     """
     Evaluate study material coverage for each syllabus topic in a course.
-    Runs hybrid retrieval against uploaded documents and applies LLM or heuristic classification.
+    Compare every syllabus item with all successfully processed chunks from its unit.
+    This avoids basing coverage on whichever few chunks a semantic search happened to return.
     """
     topics = (
         db.query(SyllabusTopic)
@@ -477,97 +491,99 @@ def analyze_coverage(course_id: int, db: Session) -> CoverageAnalysisResponse:
         .all()
     )
 
-    llm = get_llm_service()
-
-    for topic in topics:
-        subtopics_str = " ".join(str(s) for s in (topic.subtopics or []))
-        query = f"{topic.topic_name} {subtopics_str}".strip()
-
-        # Hybrid search in course chunks
-        retrieved_chunks = hybrid_search(
-            db=db,
-            query=query,
-            course_id=course_id,
-            unit_id=None,
-            top_k=5,
+    total_topics = len(topics)
+    for topic_index, topic in enumerate(topics, start=1):
+        logger.info(
+            f"Analyzing coverage {topic_index}/{total_topics}: "
+            f"Unit {topic.unit_number} — {topic.topic_name}"
+        )
+        unit = (
+            db.query(Unit)
+            .filter(
+                Unit.course_id == course_id,
+                Unit.unit_number == topic.unit_number,
+            )
+            .first()
         )
 
-        if not retrieved_chunks:
+        if not unit:
             topic.coverage_status = "not_found"
             topic.coverage_confidence = 0.0
-            topic.coverage_evidence = {"reason": "No relevant document chunks found"}
+            topic.coverage_evidence = {
+                "summary": f"No Unit {topic.unit_number} exists for this course.",
+                "citations": [],
+            }
+            db.commit()
             continue
 
-        best_score = max(c.get("score", 0.0) for c in retrieved_chunks)
-        evidence_citations: list[dict[str, Any]] = [
-            {
-                "source_filename": c.get("source_filename"),
-                "page_number": c.get("page_number"),
-                "slide_number": c.get("slide_number"),
-                "score": round(c.get("score", 0.0), 3),
-                "snippet": c.get("content", "")[:200] + "...",
-            }
-            for c in retrieved_chunks[:3]
-        ]
-
-        if llm.is_loaded():
-            context_text = "\n\n".join(
-                f"[Source: {c.get('source_filename')}]\n{c.get('content', '')}"
-                for c in retrieved_chunks[:3]
+        chunks = (
+            db.query(Chunk)
+            .join(Document, Document.id == Chunk.document_id)
+            .filter(
+                Chunk.course_id == course_id,
+                Chunk.unit_id == unit.id,
+                Document.status == "completed",
             )
-            classification_prompt = (
-                f"You are evaluating whether course materials cover a syllabus topic.\n"
-                f"Topic: {topic.topic_name}\n"
-                f"Subtopics: {topic.subtopics}\n\n"
-                f"Retrieved Excerpts from Course Notes:\n{context_text}\n\n"
-                f"Determine if the topic is:\n"
-                f"- 'covered': concepts are thoroughly explained in the excerpts\n"
-                f"- 'partially_covered': concepts are mentioned briefly or some subtopics are missing\n"
-                f"- 'not_found': excerpts are unrelated\n"
-                f"- 'needs_review': ambiguous or conflicting information\n"
-            )
-            try:
-                classified = llm.generate_structured(
-                    classification_prompt,
-                    LLMCoverageClassification,
-                    max_retries=1,
-                )
-                valid_statuses = {"covered", "partially_covered", "not_found", "needs_review"}
-                topic.coverage_status = (
-                    classified.status.lower()
-                    if classified.status.lower() in valid_statuses
-                    else "partially_covered"
-                )
-                topic.coverage_confidence = round(float(classified.confidence), 2)
-                topic.coverage_evidence = {
-                    "summary": classified.evidence_summary,
-                    "key_points": classified.key_matching_points,
-                    "citations": evidence_citations,
-                }
-                continue
-            except Exception as exc:
-                logger.warning(f"LLM coverage classification failed for topic {topic.id}: {exc}")
-
-        # Heuristic scoring fallback
-        if best_score >= 0.65:
-            topic.coverage_status = "covered"
-            topic.coverage_confidence = round(min(0.95, best_score), 2)
-        elif best_score >= 0.35:
-            topic.coverage_status = "partially_covered"
-            topic.coverage_confidence = round(best_score, 2)
-        elif best_score >= 0.15:
-            topic.coverage_status = "needs_review"
-            topic.coverage_confidence = round(best_score, 2)
-        else:
+            .order_by(Chunk.document_id, Chunk.chunk_index)
+            .all()
+        )
+        terms = _coverage_terms(topic)
+        if not chunks or not terms:
             topic.coverage_status = "not_found"
-            topic.coverage_confidence = 0.10
+            topic.coverage_confidence = 0.0
+            topic.coverage_evidence = {
+                "summary": "No processed uploaded material was found for this unit.",
+                "matched_terms": [],
+                "total_terms": len(terms),
+                "citations": [],
+            }
+            db.commit()
+            continue
+
+        normalized_chunks = [(_normalize_coverage_text(chunk.content), chunk) for chunk in chunks]
+        matched_terms: list[str] = []
+        supporting_chunks: list[Chunk] = []
+        seen_chunk_ids: set[int] = set()
+        for term in terms:
+            normalized_term = _normalize_coverage_text(term)
+            supporting_chunk = next(
+                (chunk for content, chunk in normalized_chunks if normalized_term in content),
+                None,
+            )
+            if supporting_chunk:
+                matched_terms.append(term)
+                if supporting_chunk.id not in seen_chunk_ids:
+                    seen_chunk_ids.add(supporting_chunk.id)
+                    supporting_chunks.append(supporting_chunk)
+
+        match_ratio = len(matched_terms) / len(terms)
+        topic.coverage_confidence = round(match_ratio, 2)
+        if match_ratio >= 0.8:
+            topic.coverage_status = "covered"
+        elif match_ratio > 0:
+            topic.coverage_status = "partially_covered"
+        else:
+            topic.coverage_status = "needs_review"
 
         topic.coverage_evidence = {
-            "summary": f"Matched with score {round(best_score, 3)}",
-            "citations": evidence_citations,
+            "summary": (
+                f"Found {len(matched_terms)} of {len(terms)} syllabus items in uploaded "
+                f"Unit {topic.unit_number} materials."
+            ),
+            "matched_terms": matched_terms,
+            "total_terms": len(terms),
+            "citations": [
+                {
+                    "source_filename": chunk.source_filename,
+                    "page_number": chunk.page_number,
+                    "slide_number": chunk.slide_number,
+                    "snippet": chunk.content[:500]
+                    + ("..." if len(chunk.content) > 500 else ""),
+                }
+                for chunk in supporting_chunks[:5]
+            ],
         }
-
-    db.commit()
+        db.commit()
 
     # Build response summary
     return get_coverage_summary(course_id, db)
@@ -587,6 +603,7 @@ def get_coverage_summary(course_id: int, db: Session) -> CoverageAnalysisRespons
     partially = 0
     not_found = 0
     needs_review = 0
+    coverage_points = 0.0
 
     topic_responses: list[SyllabusTopicResponse] = []
     for t in topics:
@@ -599,6 +616,17 @@ def get_coverage_summary(course_id: int, db: Session) -> CoverageAnalysisRespons
             needs_review += 1
         else:
             not_found += 1
+
+        if t.user_override_status:
+            coverage_points += (
+                1.0
+                if effective == "covered"
+                else 0.5
+                if effective == "partially_covered"
+                else 0.0
+            )
+        elif effective in {"covered", "partially_covered"}:
+            coverage_points += max(0.0, min(float(t.coverage_confidence or 0.0), 1.0))
 
         topic_responses.append(
             SyllabusTopicResponse(
@@ -621,7 +649,7 @@ def get_coverage_summary(course_id: int, db: Session) -> CoverageAnalysisRespons
             )
         )
 
-    percentage = round(((covered + 0.5 * partially) / total * 100.0), 1) if total > 0 else 0.0
+    percentage = round((coverage_points / total * 100.0), 1) if total > 0 else 0.0
 
     return CoverageAnalysisResponse(
         course_id=course_id,

@@ -7,6 +7,12 @@ import { Sparkles, BookOpen } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner';
 
+function formatElapsedTime(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+  const seconds = (totalSeconds % 60).toString().padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
 export default function TopicsPage() {
   const { data: coursesData } = useCourses();
   const courses = Array.isArray(coursesData) ? coursesData : coursesData?.courses || [];
@@ -14,17 +20,47 @@ export default function TopicsPage() {
     courses[0]?.id
   );
 
+  React.useEffect(() => {
+    if (!selectedCourseId && courses.length > 0) {
+      setSelectedCourseId(courses[0].id);
+    }
+  }, [courses, selectedCourseId]);
+
   const { data: topics = [] } = useSyllabusTopics(selectedCourseId);
   const [selectedTopicId, setSelectedTopicId] = useState<number | undefined>(
     topics[0]?.id
   );
 
+  React.useEffect(() => {
+    if (!topics.some((topic) => topic.id === selectedTopicId)) {
+      setSelectedTopicId(topics[0]?.id);
+    }
+  }, [topics, selectedTopicId]);
+
   const { data: topicContent, isLoading: contentLoading } = useTopicContent(selectedTopicId);
   const generateMutation = useGenerateTopicContent();
+  const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0);
+
+  React.useEffect(() => {
+    if (!generateMutation.isPending) {
+      setGenerationElapsedSeconds(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setGenerationElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [generateMutation.isPending]);
 
   const handleGenerate = () => {
     if (selectedTopicId) {
-      generateMutation.mutate({ topicId: selectedTopicId, regenerate: true });
+      generateMutation.mutate({
+        topicId: selectedTopicId,
+        regenerate: Boolean(topicContent),
+      });
     }
   };
 
@@ -39,10 +75,23 @@ export default function TopicsPage() {
             disabled={generateMutation.isPending || !selectedTopicId}
           >
             <Sparkles className="mr-2 h-4 w-4" />
-            {generateMutation.isPending ? 'Teaching...' : 'Teach Topic'}
+            {generateMutation.isPending
+              ? `Teaching ${formatElapsedTime(generationElapsedSeconds)}`
+              : 'Teach Topic'}
           </Button>
         }
       />
+
+      {generateMutation.isError && (
+        <p role="alert" className="text-sm text-red-700">
+          {generateMutation.error.message || 'Lesson generation failed. Upload materials for this unit and try again.'}
+        </p>
+      )}
+      {generateMutation.isPending && (
+        <p role="status" aria-live="polite" className="text-sm text-gray-600">
+          Generating the lesson locally. Elapsed time: {formatElapsedTime(generationElapsedSeconds)}.
+        </p>
+      )}
 
       <div className="flex flex-col sm:flex-row gap-4">
         <div className="w-full sm:w-64">
@@ -52,6 +101,7 @@ export default function TopicsPage() {
             onChange={(e) => {
               const cid = Number(e.target.value);
               setSelectedCourseId(cid);
+              setSelectedTopicId(undefined);
             }}
           >
             {courses.map((c) => (

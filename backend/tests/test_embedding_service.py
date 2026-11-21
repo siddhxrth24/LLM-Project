@@ -38,4 +38,7 @@ def test_chroma_initialization_disables_telemetry(monkeypatch, tmp_path) -> None
 
     assert os.environ["ANONYMIZED_TELEMETRY"] == "False"
     assert client_options["settings"].anonymized_telemetry is False
+    assert client_options["settings"].chroma_product_telemetry_impl == (
+        "app.services.chroma_telemetry.NoopProductTelemetry"
+    )
     assert service._collection is collection

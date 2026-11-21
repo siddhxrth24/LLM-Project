@@ -197,6 +197,7 @@ class LLMService:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         deadline: Optional[float] = None,
+        system_prompt: Optional[str] = None,
     ) -> str:
         """
         Generate text output from the model using tokenization and model.generate().
@@ -217,15 +218,26 @@ class LLMService:
 
         # Format prompt with chat template if supported
         if hasattr(self.tokenizer, "chat_template") and self.tokenizer.chat_template:
-            messages = [{"role": "user", "content": prompt}]
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
             try:
                 formatted_prompt = self.tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )
             except Exception:
-                formatted_prompt = prompt
+                formatted_prompt = (
+                    f"System instructions:\n{system_prompt}\n\n{prompt}"
+                    if system_prompt
+                    else prompt
+                )
         else:
-            formatted_prompt = prompt
+            formatted_prompt = (
+                f"System instructions:\n{system_prompt}\n\n{prompt}"
+                if system_prompt
+                else prompt
+            )
 
         inputs = self.tokenizer(
             formatted_prompt,
@@ -288,6 +300,8 @@ class LLMService:
         compact_output: bool = True,
         max_output_tokens: Optional[int] = None,
         include_json_schema: bool = True,
+        system_prompt: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> T:
         """
         Enforce structured JSON output matching a Pydantic schema from the LLM.
@@ -301,7 +315,8 @@ class LLMService:
         instruction = (
             f"{prompt}\n\n"
             f"IMPORTANT: Respond ONLY with a valid JSON object matching the required output shape. "
-            f"Do not include any intro text, markdown explanation, or trailing comments.\n"
+            f"Put schema fields directly at the top level; do not wrap them in another object. "
+            f"Do not include intro text, markdown, or trailing comments.\n"
             f"{schema_instruction}"
         )
         if safe_token_limit is not None and compact_output:
@@ -315,24 +330,52 @@ class LLMService:
 
         last_error = ""
         current_prompt = instruction
-        deadline = time.monotonic() + safe_timeout if safe_timeout is not None else None
+        timeout_values = [
+            timeout for timeout in (safe_timeout, timeout_seconds) if timeout is not None
+        ]
+        generation_timeout = min(timeout_values) if timeout_values else None
+        if generation_timeout is not None and generation_timeout <= 0:
+            raise ValueError("Structured generation timeout must be positive.")
+        deadline = (
+            time.monotonic() + generation_timeout
+            if generation_timeout is not None
+            else None
+        )
 
         for attempt in range(max_retries + 1):
             if deadline is not None and time.monotonic() >= deadline:
                 raise GenerationTimeoutError(
                     "Structured generation exceeded its total time limit."
                 )
-            raw_output = self.generate(
-                current_prompt,
-                temperature=0.0 if safe_token_limit is not None else 0.1,
-                max_tokens=safe_token_limit or max_output_tokens,
-                deadline=deadline,
-            )
+            generate_options: dict[str, Any] = {
+                "temperature": 0.0 if safe_token_limit is not None else 0.1,
+                "max_tokens": safe_token_limit or max_output_tokens,
+                "deadline": deadline,
+            }
+            if system_prompt:
+                generate_options["system_prompt"] = system_prompt
+            raw_output = self.generate(current_prompt, **generate_options)
 
             # Extract json substring
             json_str = self._extract_json_string(raw_output)
+            recovered_truncation = False
             try:
-                parsed_data = json.loads(json_str)
+                try:
+                    parsed_data = json.loads(json_str)
+                except json.JSONDecodeError:
+                    try:
+                        parsed_data = json.loads(self._repair_json_syntax(json_str))
+                    except json.JSONDecodeError:
+                        parsed_data = self._parse_truncated_json(json_str)
+                        recovered_truncation = True
+                parsed_data = self._unwrap_structured_payload(parsed_data, pydantic_model)
+                if recovered_truncation and isinstance(parsed_data, dict):
+                    fields = pydantic_model.model_fields
+                    if all(field.annotation is str for field in fields.values()):
+                        parsed_data = {
+                            **{name: "" for name in fields},
+                            **parsed_data,
+                        }
                 return pydantic_model.model_validate(parsed_data)
             except Exception as exc:
                 last_error = str(exc)
@@ -343,7 +386,8 @@ class LLMService:
                     current_prompt = (
                         f"{instruction}\n\n"
                         f"The previous response failed validation: {last_error}. "
-                        f"Return only the corrected valid JSON object matching the schema."
+                        f"Return only the corrected valid JSON object matching the schema. "
+                        "Put every schema field directly at the top level; do not add a wrapper object."
                     )
 
         raise ValueError(
@@ -362,8 +406,10 @@ class LLMService:
         # 2. Find outermost { ... } or [ ... ]
         first_brace = text.find("{")
         last_brace = text.rfind("}")
-        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            return text[first_brace : last_brace + 1].strip()
+        if first_brace != -1:
+            if last_brace > first_brace:
+                return text[first_brace : last_brace + 1].strip()
+            return text[first_brace:].strip()
 
         first_bracket = text.find("[")
         last_bracket = text.rfind("]")
@@ -371,6 +417,155 @@ class LLMService:
             return text[first_bracket : last_bracket + 1].strip()
 
         return text.strip()
+
+    @staticmethod
+    def _repair_json_syntax(text: str) -> str:
+        """Repair common LLM JSON slips without changing quoted string content."""
+        output: list[str] = []
+        index = 0
+        in_string = False
+        escaped = False
+
+        while index < len(text):
+            char = text[index]
+            if in_string:
+                output.append(char)
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                index += 1
+                continue
+
+            if char == '"':
+                in_string = True
+                output.append(char)
+                index += 1
+                continue
+
+            # Quote bare object keys such as: {definition: "..."}
+            if char in "{,":
+                output.append(char)
+                index += 1
+                whitespace_start = index
+                while index < len(text) and text[index].isspace():
+                    index += 1
+                key_start = index
+                while index < len(text) and (text[index].isalnum() or text[index] in "_-"):
+                    index += 1
+                key_end = index
+                while index < len(text) and text[index].isspace():
+                    index += 1
+                if key_end > key_start and index < len(text) and text[index] == ":":
+                    output.append(text[whitespace_start:key_start])
+                    output.append('"' + text[key_start:key_end] + '"')
+                    output.append(text[key_end:index + 1])
+                    index += 1
+                else:
+                    output.append(text[whitespace_start:index])
+                continue
+
+            output.append(char)
+            index += 1
+
+        repaired = "".join(output)
+        # Remove trailing commas before a closing object or array, outside strings.
+        output = []
+        index = 0
+        in_string = False
+        escaped = False
+        while index < len(repaired):
+            char = repaired[index]
+            if in_string:
+                output.append(char)
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                index += 1
+                continue
+            if char == '"':
+                in_string = True
+                output.append(char)
+            elif char == ",":
+                lookahead = index + 1
+                while lookahead < len(repaired) and repaired[lookahead].isspace():
+                    lookahead += 1
+                if lookahead >= len(repaired) or repaired[lookahead] not in "}]":
+                    output.append(char)
+            else:
+                output.append(char)
+            index += 1
+        return "".join(output)
+
+    @staticmethod
+    def _parse_truncated_json(text: str) -> Any:
+        """Close an interrupted JSON string/object so complete fields can be recovered."""
+        stack: list[str] = []
+        in_string = False
+        escaped = False
+
+        for char in text:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char in "[{":
+                stack.append(char)
+            elif char in "]}" and stack:
+                expected_open = "[" if char == "]" else "{"
+                if stack[-1] == expected_open:
+                    stack.pop()
+
+        repaired = text
+        if in_string:
+            if escaped:
+                repaired += "\\"
+            repaired += '"'
+        for opening in reversed(stack):
+            repaired += "]" if opening == "[" else "}"
+
+        return json.loads(LLMService._repair_json_syntax(repaired))
+
+    @staticmethod
+    def _unwrap_structured_payload(data: Any, pydantic_model: type[BaseModel]) -> Any:
+        """Find schema fields nested in common model-generated wrapper objects."""
+        fields = set(pydantic_model.model_fields)
+        required_fields = {
+            name
+            for name, field in pydantic_model.model_fields.items()
+            if field.is_required()
+        }
+
+        def find_payload(value: Any) -> Optional[dict[str, Any]]:
+            if isinstance(value, dict):
+                keys = set(value)
+                has_required_fields = required_fields and required_fields.issubset(keys)
+                has_known_fields = bool(fields & keys)
+                if has_known_fields and (has_required_fields or not required_fields):
+                    return value
+                for nested_value in value.values():
+                    candidate = find_payload(nested_value)
+                    if candidate is not None:
+                        return candidate
+            elif isinstance(value, list):
+                for nested_value in value:
+                    candidate = find_payload(nested_value)
+                    if candidate is not None:
+                        return candidate
+            return None
+
+        return find_payload(data) or data
 
     def get_status(self) -> dict[str, Any]:
         """Return diagnostic status of LLM engine."""

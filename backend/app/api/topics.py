@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
@@ -61,11 +61,15 @@ async def generate_lesson(
     return _to_content_response(record, topic.topic_name)
 
 
-@router.get("/{topic_id}/content", response_model=TopicContentResponse)
+@router.get(
+    "/{topic_id}/content",
+    response_model=TopicContentResponse,
+    responses={204: {"description": "Lesson content has not been generated yet."}},
+)
 async def get_lesson(
     topic_id: int,
     db: Session = Depends(get_db),
-) -> TopicContentResponse:
+) -> TopicContentResponse | Response:
     """Retrieve saved lesson content for a syllabus topic."""
     topic = db.query(SyllabusTopic).filter(SyllabusTopic.id == topic_id).first()
     if not topic:
@@ -76,9 +80,6 @@ async def get_lesson(
 
     record = svc_get_content(topic_id=topic_id, db=db)
     if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Content for topic '{topic.topic_name}' has not been generated yet. Call POST /api/topics/generate/{topic_id} first.",
-        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return _to_content_response(record, topic.topic_name)

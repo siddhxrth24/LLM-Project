@@ -114,6 +114,28 @@ export default function CoverageAnalysis() {
   // Mutations
   const analyzeMutation = useAnalyzeCoverage();
   const updateTopicMutation = useUpdateTopic();
+  const [analysisElapsedSeconds, setAnalysisElapsedSeconds] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!analyzeMutation.isPending) {
+      setAnalysisElapsedSeconds(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    const elapsedTimer = window.setInterval(() => {
+      setAnalysisElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    const refreshTimer = window.setInterval(() => {
+      void refetchTopics();
+      void refetchCoverage();
+    }, 3000);
+
+    return () => {
+      window.clearInterval(elapsedTimer);
+      window.clearInterval(refreshTimer);
+    };
+  }, [analyzeMutation.isPending, refetchCoverage, refetchTopics]);
 
   // Run full coverage analysis
   const handleRunAnalysis = async () => {
@@ -238,7 +260,21 @@ export default function CoverageAnalysis() {
     ).length;
     const total = allTopics.length;
     const percentage =
-      total > 0 ? Math.round(((covered + partially * 0.5) / total) * 100) : 0;
+      total > 0
+        ? Math.round(
+            (allTopics.reduce((score, topic) => {
+              const status = topic.user_override_status || topic.effective_status || topic.coverage_status;
+              if (topic.user_override_status) {
+                return score + (status === 'covered' ? 1 : status === 'partially_covered' ? 0.5 : 0);
+              }
+              return score + (status === 'covered' || status === 'partially_covered'
+                ? Math.max(0, Math.min(topic.coverage_confidence || 0, 1))
+                : 0);
+            }, 0) /
+              total) *
+              100
+          )
+        : 0;
 
     return {
       total,
@@ -428,7 +464,16 @@ export default function CoverageAnalysis() {
           <Sparkles className="h-4 w-4 text-primary-600 animate-spin" />
           <AlertTitle>Semantic Vector Matching in Progress</AlertTitle>
           <AlertDescription>
-            The offline sentence embedding model is scanning your document chunks to compute confidence scores and highlight excerpts for each syllabus topic...
+            Checking each topic against uploaded materials from its matching unit. Verified results appear as topics finish. Elapsed {Math.floor(analysisElapsedSeconds / 60).toString().padStart(2, '0')}:{(analysisElapsedSeconds % 60).toString().padStart(2, '0')}.
+          </AlertDescription>
+        </Alert>
+      )}
+      {analyzeMutation.isError && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Coverage analysis failed</AlertTitle>
+          <AlertDescription>
+            {analyzeMutation.error.message || 'Could not analyze uploaded unit materials. Try again.'}
           </AlertDescription>
         </Alert>
       )}
@@ -524,6 +569,14 @@ export default function CoverageAnalysis() {
                             score?: number;
                           }> = Array.isArray(evidenceObj)
                             ? evidenceObj
+                            : Array.isArray(evidenceObj.citations)
+                            ? (evidenceObj.citations as Array<Record<string, unknown>>).map((citation) => ({
+                                source_file: String(citation.source_filename || ''),
+                                page_number: typeof citation.page_number === 'number' ? citation.page_number : undefined,
+                                slide_number: typeof citation.slide_number === 'number' ? citation.slide_number : undefined,
+                                excerpt: String(citation.snippet || ''),
+                                score: typeof citation.score === 'number' ? citation.score : undefined,
+                              }))
                             : Array.isArray(evidenceObj.matches)
                             ? evidenceObj.matches
                             : Array.isArray(evidenceObj.snippets)

@@ -2,6 +2,7 @@ import * as React from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   Sparkles,
+  AlertCircle,
   BookOpen,
   Lightbulb,
   Code2,
@@ -45,6 +46,12 @@ import { Badge } from '@/components/ui/badge';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
+
+function formatElapsedTime(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+  const seconds = (totalSeconds % 60).toString().padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
 
 export default function TopicLearning() {
   const navigate = useNavigate();
@@ -118,6 +125,22 @@ export default function TopicLearning() {
 
   // Generate content mutation
   const generateMutation = useGenerateTopicContent();
+  const isGenerating = generateMutation.isPending;
+  const [generationElapsedSeconds, setGenerationElapsedSeconds] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!isGenerating) {
+      setGenerationElapsedSeconds(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setGenerationElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [isGenerating]);
 
   const handleGenerateContent = async (regenerate = false) => {
     if (!selectedTopicId) return;
@@ -126,7 +149,6 @@ export default function TopicLearning() {
         topicId: selectedTopicId,
         regenerate,
       });
-      refetchContent();
     } catch {
       // Handled
     }
@@ -175,8 +197,6 @@ export default function TopicLearning() {
     );
   }
 
-  const isGenerating = generateMutation.isPending;
-
   return (
     <div className="space-y-6 pb-12">
       <PageHeader
@@ -208,7 +228,7 @@ export default function TopicLearning() {
                 {isGenerating ? (
                   <>
                     <RotateCw className="h-3.5 w-3.5 animate-spin" />
-                    Generating with LLM...
+                    Generating {formatElapsedTime(generationElapsedSeconds)}
                   </>
                 ) : (
                   <>
@@ -332,7 +352,16 @@ export default function TopicLearning() {
                 Synthesizing Pedagogical Lesson (Offline CPU LLM)
               </AlertTitle>
               <AlertDescription className="text-primary-800 text-xs">
-                Generating definitions, intuition, real-world analogies, step-by-step worked examples, and check-for-understanding practice questions. This may take 15–30 seconds.
+                Generating source-grounded lesson content. Elapsed time: {formatElapsedTime(generationElapsedSeconds)}. A malformed first response may be retried automatically.
+              </AlertDescription>
+            </Alert>
+          )}
+          {generateMutation.isError && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>Lesson could not be generated</AlertTitle>
+              <AlertDescription>
+                {generateMutation.error.message || 'Upload and process materials for this topic’s unit, then try again.'}
               </AlertDescription>
             </Alert>
           )}
@@ -358,15 +387,15 @@ export default function TopicLearning() {
           ) : (
             <div className="space-y-6">
               {/* 1. Formal Definition */}
-              <Card className="border-primary-200/80 bg-gradient-to-br from-primary-50/50 via-white to-primary-50/20">
+              <Card className="border-sky-300 bg-sky-50 dark:border-sky-700 dark:bg-slate-900">
                 <CardHeader className="pb-2">
-                  <div className="flex items-center gap-2 text-primary-800 font-semibold text-sm">
-                    <BookOpen className="h-4 w-4" />
+                  <div className="flex items-center gap-2 text-sky-950 dark:text-sky-200 font-semibold text-sm">
+                    <BookOpen className="h-4 w-4 text-sky-700 dark:text-sky-300" />
                     <span>Formal Academic Definition</span>
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-gray-900 text-sm sm:text-base font-medium leading-relaxed">
+                  <p className="text-slate-950 dark:text-slate-100 text-sm sm:text-base font-semibold leading-relaxed">
                     {topicContent.content.definition}
                   </p>
                 </CardContent>
@@ -474,20 +503,21 @@ export default function TopicLearning() {
                 </Card>
 
                 {/* Supplemental */}
-                <Card className="border-gray-200 bg-gray-50/50">
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center gap-2 text-gray-700 font-semibold text-xs uppercase tracking-wider">
-                      <Quote className="h-4 w-4 text-gray-500" />
-                      <span>Supplemental Context (LLM Augmented)</span>
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-xs text-gray-600 leading-relaxed">
-                      {topicContent.content.supplemental_notes ||
-                        'Standard academic background knowledge provided by the offline model to enrich understanding.'}
-                    </p>
-                  </CardContent>
-                </Card>
+                {topicContent.content.supplemental_notes && (
+                  <Card className="border-gray-200 bg-gray-50/50">
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center gap-2 text-gray-700 font-semibold text-xs uppercase tracking-wider">
+                        <Quote className="h-4 w-4 text-gray-500" />
+                        <span>Supplemental Context</span>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="text-xs text-gray-600 leading-relaxed">
+                        {topicContent.content.supplemental_notes}
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
               </div>
 
               {/* 7. Practice Questions (Expandable Q&A) */}
